@@ -5,7 +5,7 @@ import json
 class ProtocolWrapper:
     def __init__(self):
         self.protocol = ExProtocol()
-        self.session_id = None
+        self.connection_id = None
         self.private_key = None
 
     def create_handshake_request(self):
@@ -33,29 +33,29 @@ class ProtocolWrapper:
 
     def perform_handshake_response(self, handshake_request):
         # Respond to a handshake request and generate a new private key
-        response, self.private_key, self.session_id = self.protocol.perform_handshake_response(handshake_request)
+        response, self.private_key, self.connection_id = self.protocol.perform_handshake_response(handshake_request)
         if not response:
             raise Exception("Failed to create handshake response.")
         if self.private_key is None:
             raise Exception("Private key was not generated.")
-        if not self.session_id:
-            raise Exception("Session ID was not generated.")
-        print(f"Session ID established: {self.session_id.hex()}")
+        if not self.connection_id:
+            raise Exception("connection ID was not generated.")
+        print(f"connection ID established: {self.connection_id.hex()}")
         return response
 
     def complete_handshake(self, response):
         # Complete the handshake using the response and private key
-        self.session_id = self.protocol.complete_handshake(response, self.private_key)
-        if not self.session_id:
+        self.connection_id = self.protocol.complete_handshake(response, self.private_key)
+        if not self.connection_id:
             raise Exception("Failed to complete handshake.")
-        print(f"Session ID established: {self.session_id.hex()}")
+        print(f"connection ID established: {self.connection_id.hex()}")
 
     def send_data(self, data):
-        if not self.session_id:
-            raise Exception("No active session. Please initiate a handshake first.")
+        if not self.connection_id:
+            raise Exception("No active connection. Please initiate a handshake first.")
 
         request_data = json.dumps(data).encode('utf-8')
-        encrypted_message, packet_uuid = self.protocol.create_data_packet(self.session_id, request_data)
+        encrypted_message, packet_uuid = self.protocol.create_data_packet(self.connection_id, request_data)
 
         if encrypted_message is None:
             raise Exception("Failed to encrypt message.")
@@ -63,11 +63,11 @@ class ProtocolWrapper:
         return encrypted_message, packet_uuid
 
     def send_response(self, data, original_packet_uuid, response_code=200):
-        if not self.session_id:
-            raise Exception("No active session. Please initiate a handshake first.")
+        if not self.connection_id:
+            raise Exception("No active connection. Please initiate a handshake first.")
 
         response_data = json.dumps(data).encode('utf-8')
-        encrypted_message = self.protocol.create_response_packet(self.session_id, response_data, original_packet_uuid, response_code)
+        encrypted_message = self.protocol.create_response_packet(self.connection_id, response_data, original_packet_uuid, response_code)
 
         if encrypted_message is None:
             raise Exception("Failed to encrypt message.")
@@ -75,8 +75,8 @@ class ProtocolWrapper:
         return encrypted_message
 
     def decrypt_data(self, encrypted_data_packet):
-        if not self.session_id:
-            raise Exception("No active session. Please initiate a handshake first.")
+        if not self.connection_id:
+            raise Exception("No active connection. Please initiate a handshake first.")
 
         decrypted_data, header, flag, packet_uuid = self.protocol.decrypt_packet(encrypted_data_packet)
         if decrypted_data is None:
@@ -89,8 +89,8 @@ class ProtocolWrapper:
         return data, header, packet_uuid
 
     def decrypt_response(self, encrypted_response_packet):
-        if not self.session_id:
-            raise Exception("No active session. Please initiate a handshake first.")
+        if not self.connection_id:
+            raise Exception("No active connection. Please initiate a handshake first.")
 
         decrypted_response, header, flag, packet_uuid = self.protocol.decrypt_packet(encrypted_response_packet)
         if decrypted_response is None:
