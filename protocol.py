@@ -58,25 +58,25 @@ class ExProtocol:
             print(f"Key exchange failed: {e}")
             return None
 
-    def derive_session_key(self, shared_secret):
+    def derive_connection_key(self, shared_secret):
         if shared_secret is None:
-            print("Shared secret is None, cannot derive session key.")
+            print("Shared secret is None, cannot derive connection key.")
             return None
         try:
-            session_key = HKDF(
+            connection_key = HKDF(
                 algorithm=hashes.SHA256(),
                 length=32,
                 salt=None,
                 info=b'handshake data',
             ).derive(shared_secret)
-            return session_key
+            return connection_key
         except Exception as e:
-            print(f"Session key derivation failed: {e}")
+            print(f"connection key derivation failed: {e}")
             return None
 
-    def initialize_session(self, connection_id, session_key, valid_until, private_key, max_packet_size_a, max_packet_size_b):
+    def initialize_connection(self, connection_id, connection_key, valid_until, private_key, max_packet_size_a, max_packet_size_b):
         self.connections[connection_id] = {
-            'session_key': session_key,
+            'connection_key': connection_key,
             'valid_until': valid_until,
             'private_key': private_key,
             'max_packet_size': min(max_packet_size_a, max_packet_size_b)
@@ -212,24 +212,24 @@ class ExProtocol:
             print("Invalid PoW solution.")
             return None, None, None
 
-        # Proceed with key generation and session initialization
+        # Proceed with key generation and connection initialization
         private_key, public_key = self.generate_key_pair()
         shared_secret = self.exchange_keys(private_key, public_key_bytes)
         if not shared_secret:
             print("Failed to exchange keys during handshake.")
             return None, None, None
 
-        session_key = self.derive_session_key(shared_secret)
-        if not session_key:
-            print("Failed to derive session key during handshake.")
+        connection_key = self.derive_connection_key(shared_secret)
+        if not connection_key:
+            print("Failed to derive connection key during handshake.")
             return None, None, None
 
         connection_id = os.urandom(16)
         valid_until = time.time() + self.DEFAULT_VALIDITY_PERIOD
-        self.initialize_session(connection_id, session_key, valid_until, private_key, self.MAX_PACKET_SIZE, max_packet_size)
+        self.initialize_connection(connection_id, connection_key, valid_until, private_key, self.MAX_PACKET_SIZE, max_packet_size)
 
-        # Prepare encrypted data with session ID and validity timestamp
-        aesgcm = AESGCM(session_key)
+        # Prepare encrypted data with connection ID and validity timestamp
+        aesgcm = AESGCM(connection_key)
         nonce = os.urandom(12)
         handshake_data = json.dumps({
             'connection_id': connection_id.hex(),
@@ -269,15 +269,15 @@ class ExProtocol:
             print("HSR flag not found in response.")
             return None
 
-        # Derive shared secret and session key
+        # Derive shared secret and connection key
         shared_secret = self.exchange_keys(private_key, public_key_bytes)
-        session_key = self.derive_session_key(shared_secret)
-        if not session_key:
-            print("Failed to derive session key during handshake completion.")
+        connection_key = self.derive_connection_key(shared_secret)
+        if not connection_key:
+            print("Failed to derive connection key during handshake completion.")
             return None
 
         # Decrypt the handshake data
-        aesgcm = AESGCM(session_key)
+        aesgcm = AESGCM(connection_key)
         handshake_data_json = aesgcm.decrypt(nonce, encrypted_handshake_data, None)
         handshake_data = json.loads(handshake_data_json.decode('utf-8'))
 
@@ -285,7 +285,7 @@ class ExProtocol:
         valid_until = handshake_data['valid_until']
         max_packet_size = handshake_data['max_packet_size']
 
-        self.initialize_session(connection_id, session_key, valid_until, private_key, self.MAX_PACKET_SIZE, max_packet_size)
+        self.initialize_connection(connection_id, connection_key, valid_until, private_key, self.MAX_PACKET_SIZE, max_packet_size)
         return connection_id
 
     def create_data_packet(self, connection_id, request_data) -> bytes:
@@ -334,17 +334,17 @@ class ExProtocol:
                 print("Missing fields : ", [k for k in ("timestamp", "encoding", "type", "data_type") if k not in header])
                 return None
 
-            session_info = self.connections.get(connection_id)
-            if not session_info:
-                print("Session not found in encrypt data.")
+            connection_info = self.connections.get(connection_id)
+            if not connection_info:
+                print("connection not found in encrypt data.")
                 return None
 
-            if time.time() > session_info['valid_until']:
-                print("Session expired, please perform a new handshake.")
+            if time.time() > connection_info['valid_until']:
+                print("connection expired, please perform a new handshake.")
                 return None
 
-            session_key = session_info['session_key']
-            aesgcm = AESGCM(session_key)
+            connection_key = connection_info['connection_key']
+            aesgcm = AESGCM(connection_key)
             nonce = os.urandom(12)
 
             # Compress, then encrypt header and data
@@ -371,23 +371,23 @@ class ExProtocol:
             decoded_packet = decode_bytes_with_hamming(packet)
 
             connection_id = decoded_packet[:16]
-            session_info = self.connections.get(connection_id)
-            if not session_info:
-                print("Session not found for decryption.")
+            connection_info = self.connections.get(connection_id)
+            if not connection_info:
+                print("connection not found for decryption.")
                 return None, None, None, None
 
-            if time.time() > session_info['valid_until']:
-                print("Session expired, please perform a new handshake.")
+            if time.time() > connection_info['valid_until']:
+                print("connection expired, please perform a new handshake.")
                 return None, None, None, None
 
-            session_key = session_info['session_key']
+            connection_key = connection_info['connection_key']
             nonce = decoded_packet[16:28]
             encrypted_header_length = struct.unpack('!I', decoded_packet[28:32])[0]
             encrypted_header = decoded_packet[32:32+encrypted_header_length]
             payload_length = struct.unpack('!Q', decoded_packet[32+encrypted_header_length:40+encrypted_header_length])[0]
             ciphertext = decoded_packet[40+encrypted_header_length:40+encrypted_header_length+payload_length]
 
-            aesgcm = AESGCM(session_key)
+            aesgcm = AESGCM(connection_key)
             header_json = zlib.decompress(aesgcm.decrypt(nonce, encrypted_header, None))
             header_dict = json.loads(header_json.decode('utf-8'))
 
@@ -462,8 +462,8 @@ def main():
     connection_id_a = protocol_a.complete_handshake(response, node_a_private_key)
 
     print("Handshake completed successfully.")
-    print("Session ID A:", connection_id_a.hex())
-    print("Session ID B:", connection_id_b.hex())
+    print("connection ID A:", connection_id_a.hex())
+    print("connection ID B:", connection_id_b.hex())
 
     encrypted_packet, packet_uuid = protocol_a.create_data_packet(connection_id_a, b'Hello, Node B!')
     print("Encrypted packet:", encrypted_packet)
