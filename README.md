@@ -30,6 +30,12 @@ ExProtocol provides a comprehensive framework for establishing secure connection
    ```
 
 
+### Usage
+- Import the `ExProtocol` class and use it to establish secure connections and exchange data between nodes.
+- Refer to the example usage in the `main()` function for the proper handshake flow and a demonstration of the protocol's capabilities.
+
+
+
 # 1. Initiator PoW Request (HPW)
 
 | Field | Description | Length (Bytes) | Notes |
@@ -113,10 +119,6 @@ Encrypted Handshake Data Fields
 | Status Code | Indicates the status of the response (e.g., 200, 500)                       |
 
 
-
-### Usage
-- Import the `ExProtocol` class and use it to establish secure connections and exchange data between nodes.
-- Refer to the example usage in the `main()` function for a demonstration of the protocol's capabilities.
 
 ## Contributing
 Contributions are welcome! Please fork the repository and submit a pull request with your changes. Or just message me directly.
