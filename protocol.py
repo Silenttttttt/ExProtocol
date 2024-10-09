@@ -1,3 +1,4 @@
+import threading
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
@@ -17,10 +18,13 @@ class ExProtocol:
     # Static flags for packet types
     HANDSHAKE_FLAG = b'\x01'
     HANDSHAKE_RESPONSE_FLAG = b'\x02'
-    DATA_FLAG = b'\x03'
-    RESPONSE_FLAG = b'\x04'
-    HPW_FLAG = b'\x05'
-    HPW_RESPONSE_FLAG = b'\x06'
+    HPW_FLAG = b'\x03'
+    HPW_RESPONSE_FLAG = b'\x04'
+
+    # Simplified flags for JSON encoding
+    DATA_FLAG = 5
+    RESPONSE_FLAG = 6
+    STREAM_FLAG = 7
 
     DEFAULT_VALIDITY_PERIOD = 3600  # 1 hour
     POW_DIFFICULTY = 4
@@ -283,17 +287,24 @@ class ExProtocol:
         self.initialize_connection(connection_id, connection_key, valid_until, private_key, self.MAX_PACKET_SIZE, max_packet_size)
         return connection_id
 
-    def create_data_packet(self, connection_id, request_data) -> bytes:
+    def generate_data_packet(self, connection_id, data, header=None) -> bytes:
         connection = self.connections.get(connection_id)
         if not connection:
             raise Exception("Connection not found.")
-        return connection.create_data_packet(request_data)
-        
-    def create_response_packet(self, connection_id, response_data, original_packet_uuid, response_code=200) -> bytes:
+        return connection.create_data_packet(data, header)
+
+    def generate_response_packet(self, connection_id, data, original_packet_uuid, header=None) -> bytes:
         connection = self.connections.get(connection_id)
         if not connection:
             raise Exception("Connection not found.")
-        return connection.create_response_packet(response_data, original_packet_uuid, response_code)
+        return connection.create_response_packet(data, original_packet_uuid, header)
+
+
+    def create_stream_packet(self, connection_id, stream_id, stream_data) -> bytes:
+        connection = self.connections.get(connection_id)
+        if not connection:
+            raise Exception("Connection not found.")
+        return connection.create_stream_packet(stream_id, stream_data)
     
     def decrypt_packet(self, packet: bytes) -> tuple[bytes, dict, str, str]:
         try:
@@ -323,50 +334,67 @@ class Connection:
         self.max_packet_size = max_packet_size
         self.private_key = private_key
         self.valid_until = valid_until
+        self.active_streams = {}
+        self.stream_thread = None
 
-    def create_data_packet(self, data):
-        header = {
+
+    def create_data_packet(self, data, header=None):
+        default_header = {
             "timestamp": int(time.time()),
             "encoding": 'utf-8',
-            "type": int.from_bytes(ExProtocol.DATA_FLAG, byteorder='big'),  # Convert byte to int
+            "type": ExProtocol.DATA_FLAG,
             "data_type": "application/json"
         }
-        encrypted_packet = self.encrypt_data(data, header)
+        if header:
+            default_header.update(header)
+        encrypted_packet = self._encrypt_data(data, default_header)
         if encrypted_packet is None:
-            raise Exception("Failed to create request.")
-           
-        # Derive packet UUID by hashing the encrypted packet
+            raise Exception("Failed to create data packet.")
+        
         packet_uuid = hashlib.sha256(encrypted_packet).hexdigest()
-
-        # Encode the entire packet using Hamming code
         encoded_packet = encode_bytes_with_hamming(encrypted_packet)
-
         return encoded_packet, packet_uuid
 
-    def create_response_packet(self, data, original_packet_uuid, response_code):
+    def create_response_packet(self, data, original_packet_uuid, header=None):
+        default_header = {
+            "timestamp": int(time.time()),
+            "encoding": 'utf-8',
+            "type": ExProtocol.RESPONSE_FLAG,
+            "data_type": "application/json",
+            "packet_uuid": original_packet_uuid
+        }
+        if header:
+            default_header.update(header)
+        encrypted_packet = self._encrypt_data(data, default_header)
+        if encrypted_packet is None:
+            raise Exception("Failed to create response packet.")
+        
+        encoded_packet = encode_bytes_with_hamming(encrypted_packet)
+        return encoded_packet
+    
+    def create_stream_packet(self, stream_id, stream_data):
         header = {
             "timestamp": int(time.time()),
             "encoding": 'utf-8',
-            "type": int.from_bytes(ExProtocol.RESPONSE_FLAG, byteorder='big'),  # Convert byte to int
-            "data_type": "application/json",
-            "status_code": response_code,
-            "packet_uuid": original_packet_uuid  # Include original packet UUID
+            "type": ExProtocol.STREAM_FLAG,
+            "stream_id": stream_id
         }
-        encrypted_packet = self.encrypt_data(data, header)
+        encrypted_packet = self._encrypt_data(stream_data, header)
         if encrypted_packet is None:
-            raise Exception("Failed to create response.")
+            raise Exception("Failed to create stream packet.")
 
         # Encode the entire packet using Hamming code
         encoded_packet = encode_bytes_with_hamming(encrypted_packet)
 
         return encoded_packet
 
-    def encrypt_data(self, data, header):
+
+    def _encrypt_data(self, data, header):
         try:
             # Validate header
-            if not all(k in header for k in ("timestamp", "encoding", "type", "data_type")):
-                print("To encrypt data, header must include 'timestamp', 'encoding', 'type', and 'data_type'.")
-                print("Missing fields : ", [k for k in ("timestamp", "encoding", "type", "data_type") if k not in header])
+            if not all(k in header for k in ("timestamp", "encoding", "type")):
+                print("To encrypt data, header must include 'timestamp', 'encoding', and 'type'.")
+                print("Missing fields : ", [k for k in ("timestamp", "encoding", "type") if k not in header])
                 return None
 
             if time.time() > self.valid_until:
@@ -416,8 +444,8 @@ class Connection:
             header_dict = json.loads(header_json.decode('utf-8'))
 
             # Validate header fields
-            if not all(k in header_dict for k in ("timestamp", "encoding", "type", "data_type")):
-                print("Decrypted header must include 'timestamp', 'encoding', 'type', and 'data_type'.")
+            if not all(k in header_dict for k in ("timestamp", "encoding", "type")):
+                print("Decrypted header must include 'timestamp', 'encoding', and 'type'.")
                 return None, None, None, None
 
             # Check if the request is older than 1 minute
@@ -429,12 +457,14 @@ class Connection:
             packet_uuid = header_dict.get("packet_uuid", hashlib.sha256(packet).hexdigest())
 
             # Determine packet type
-            packet_type = bytes([header_dict["type"]])
+            packet_type = header_dict["type"]
 
             if packet_type == ExProtocol.DATA_FLAG:
                 print("Processing data packet.")
             elif packet_type == ExProtocol.RESPONSE_FLAG:
                 print("Processing response packet.")
+            elif packet_type == ExProtocol.STREAM_FLAG:
+                print("Processing stream packet.")
             else:
                 print("Unknown packet type.")
                 return None, None, None, None
@@ -480,7 +510,7 @@ def main():
     print("Connection ID B:", connection_id_b.hex())
 
     # Create a data packet
-    data_packet, packet_uuid = protocol_a.create_data_packet(connection_id_a, b'Hello, Node B!')
+    data_packet, packet_uuid = protocol_a.generate_data_packet(connection_id_a, b'Hello, Node B!')
     print("Data packet:", data_packet)
     print("Packet UUID:", packet_uuid)
 
@@ -490,6 +520,17 @@ def main():
     print("Header:", header)
     print("Flag:", flag)
     print("Packet UUID:", packet_uuid_b)
+
+    # # Create a stream packet
+    # stream_packet = protocol_a.generate_data_packet(connection_id_a, "stream1", b'Streaming data...')
+    # print("Stream packet:", stream_packet)
+
+    # # Decrypt the stream packet
+    # decrypted_stream_data, stream_header, stream_flag, stream_packet_uuid = protocol_b.decrypt_packet(stream_packet)
+    # print("Decrypted stream data:", decrypted_stream_data)
+    # print("Stream Header:", stream_header)
+    # print("Stream Flag:", stream_flag)
+    # print("Stream Packet UUID:", stream_packet_uuid)
 
 
 if __name__ == "__main__":

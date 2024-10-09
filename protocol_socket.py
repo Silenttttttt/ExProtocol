@@ -2,7 +2,7 @@ import socket
 import json
 from protocol_wrapper import ProtocolWrapper
 import sys
-
+import traceback
 
 MAX_PACKET_SIZE = 8192
 
@@ -54,6 +54,7 @@ class SocketProtocolWrapper:
                 connection.sendall(encrypted_response)
         except Exception as e:
             print(f"Error: {e}")
+            traceback.print_exc()
         finally:
             connection.close()
             server_socket.close()
@@ -89,9 +90,9 @@ class SocketProtocolWrapper:
                 message = input("Enter message to send: ")
                 request_data = {"message": message}
                 encrypted_request, packet_uuid = self.protocol_wrapper.send_data(request_data)
-                print("Sending encrypted request")
+                print("Sending encrypted data packet")
                 client_socket.sendall(encrypted_request)
-
+                
                 # Receive a response from server
                 data = client_socket.recv(MAX_PACKET_SIZE)
                 if not data:
@@ -102,6 +103,7 @@ class SocketProtocolWrapper:
                 print(f"Received from server: {received_response}")
         except Exception as e:
             print(f"Error: {e}")
+            traceback.print_exc()
         finally:
             client_socket.close()
             if 'e' in locals():

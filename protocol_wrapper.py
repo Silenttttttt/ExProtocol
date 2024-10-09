@@ -39,8 +39,8 @@ class ProtocolWrapper:
         if self.private_key is None:
             raise Exception("Private key was not generated.")
         if not self.connection_id:
-            raise Exception("connection ID was not generated.")
-        print(f"connection ID established: {self.connection_id.hex()}")
+            raise Exception("Connection ID was not generated.")
+        print(f"Connection ID established: {self.connection_id.hex()}")
         return response
 
     def complete_handshake(self, response):
@@ -48,27 +48,28 @@ class ProtocolWrapper:
         self.connection_id = self.protocol.complete_handshake(response, self.private_key)
         if not self.connection_id:
             raise Exception("Failed to complete handshake.")
-        print(f"connection ID established: {self.connection_id.hex()}")
+        print(f"Connection ID established: {self.connection_id.hex()}")
 
-    def send_data(self, data):
+    def send_data(self, data, header=None):
+
+        if isinstance(data, dict):
+            data = json.dumps(data).encode('utf-8')
+
         if not self.connection_id:
             raise Exception("No active connection. Please initiate a handshake first.")
 
-        request_data = json.dumps(data).encode('utf-8')
-        encrypted_message, packet_uuid = self.protocol.create_data_packet(self.connection_id, request_data)
-
+        encrypted_message, packet_uuid = self.protocol.generate_data_packet(self.connection_id, data, header)
         if encrypted_message is None:
             raise Exception("Failed to encrypt message.")
 
         return encrypted_message, packet_uuid
 
-    def send_response(self, data, original_packet_uuid, response_code=200):
+    def send_response(self, data, original_packet_uuid, header=None):
         if not self.connection_id:
             raise Exception("No active connection. Please initiate a handshake first.")
 
         response_data = json.dumps(data).encode('utf-8')
-        encrypted_message = self.protocol.create_response_packet(self.connection_id, response_data, original_packet_uuid, response_code)
-
+        encrypted_message = self.protocol.generate_response_packet(self.connection_id, response_data, original_packet_uuid, header)
         if encrypted_message is None:
             raise Exception("Failed to encrypt message.")
 
