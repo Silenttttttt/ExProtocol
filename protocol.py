@@ -75,12 +75,7 @@ class ExProtocol:
             return None
 
     def initialize_connection(self, connection_id, connection_key, valid_until, private_key, max_packet_size_a, max_packet_size_b):
-        self.connections[connection_id] = {
-            'connection_key': connection_key,
-            'valid_until': valid_until,
-            'private_key': private_key,
-            'max_packet_size': min(max_packet_size_a, max_packet_size_b)
-        }
+        self.connections[connection_id] = Connection(connection_id, connection_key, min(max_packet_size_a, max_packet_size_b), private_key, valid_until)
 
     def perform_handshake_request(self) -> tuple[bytes, bytes]:
         private_key, public_key = self.generate_key_pair()
@@ -159,7 +154,7 @@ class ExProtocol:
             if len(proof_bytes) <= self.MAX_PROOF_LENGTH and self.verify_pow(nonce, proof_bytes, difficulty):
                 break
             proof += 1
-
+        
         # Prepare the handshake request with the proof of work solution and max packet size
         public_key_bytes = private_key.public_key().public_bytes(
             encoding=serialization.Encoding.DER,
@@ -289,13 +284,54 @@ class ExProtocol:
         return connection_id
 
     def create_data_packet(self, connection_id, request_data) -> bytes:
+        connection = self.connections.get(connection_id)
+        if not connection:
+            raise Exception("Connection not found.")
+        return connection.create_data_packet(request_data)
+        
+    def create_response_packet(self, connection_id, response_data, original_packet_uuid, response_code=200) -> bytes:
+        connection = self.connections.get(connection_id)
+        if not connection:
+            raise Exception("Connection not found.")
+        return connection.create_response_packet(response_data, original_packet_uuid, response_code)
+    
+    def decrypt_packet(self, packet: bytes) -> tuple[bytes, dict, str, str]:
+        try:
+            # Decode the entire packet using Hamming code
+            decoded_packet = decode_bytes_with_hamming(packet)
+
+            connection_id = decoded_packet[:16]
+            connection = self.connections.get(connection_id)
+            if not connection:
+                print("Connection not found for decryption.")
+                return None, None, None, None
+
+            return connection.decrypt_packet(decoded_packet)
+        except InvalidSignature:
+            print("Decryption failed: Integrity check failed.")
+            return None, None, None, None
+        except Exception as e:
+            traceback.print_exc()
+            print(f"Decryption failed: {e}")
+            return None, None, None, None
+
+
+class Connection:
+    def __init__(self, connection_id, connection_key, max_packet_size, private_key, valid_until):
+        self.connection_id = connection_id
+        self.connection_key = connection_key
+        self.max_packet_size = max_packet_size
+        self.private_key = private_key
+        self.valid_until = valid_until
+
+    def create_data_packet(self, data):
         header = {
             "timestamp": int(time.time()),
             "encoding": 'utf-8',
             "type": int.from_bytes(ExProtocol.DATA_FLAG, byteorder='big'),  # Convert byte to int
             "data_type": "application/json"
         }
-        encrypted_packet = self.encrypt_data(connection_id, request_data, header)
+        encrypted_packet = self.encrypt_data(data, header)
         if encrypted_packet is None:
             raise Exception("Failed to create request.")
            
@@ -306,9 +342,8 @@ class ExProtocol:
         encoded_packet = encode_bytes_with_hamming(encrypted_packet)
 
         return encoded_packet, packet_uuid
-        
-        
-    def create_response_packet(self, connection_id, response_data, original_packet_uuid, response_code=200) -> bytes:
+
+    def create_response_packet(self, data, original_packet_uuid, response_code):
         header = {
             "timestamp": int(time.time()),
             "encoding": 'utf-8',
@@ -317,7 +352,7 @@ class ExProtocol:
             "status_code": response_code,
             "packet_uuid": original_packet_uuid  # Include original packet UUID
         }
-        encrypted_packet = self.encrypt_data(connection_id, response_data, header)
+        encrypted_packet = self.encrypt_data(data, header)
         if encrypted_packet is None:
             raise Exception("Failed to create response.")
 
@@ -325,8 +360,8 @@ class ExProtocol:
         encoded_packet = encode_bytes_with_hamming(encrypted_packet)
 
         return encoded_packet
-    
-    def encrypt_data(self, connection_id, data, header) -> bytes:
+
+    def encrypt_data(self, data, header):
         try:
             # Validate header
             if not all(k in header for k in ("timestamp", "encoding", "type", "data_type")):
@@ -334,17 +369,11 @@ class ExProtocol:
                 print("Missing fields : ", [k for k in ("timestamp", "encoding", "type", "data_type") if k not in header])
                 return None
 
-            connection_info = self.connections.get(connection_id)
-            if not connection_info:
-                print("connection not found in encrypt data.")
+            if time.time() > self.valid_until:
+                print("Connection expired, please perform a new handshake.")
                 return None
 
-            if time.time() > connection_info['valid_until']:
-                print("connection expired, please perform a new handshake.")
-                return None
-
-            connection_key = connection_info['connection_key']
-            aesgcm = AESGCM(connection_key)
+            aesgcm = AESGCM(self.connection_key)
             nonce = os.urandom(12)
 
             # Compress, then encrypt header and data
@@ -356,7 +385,7 @@ class ExProtocol:
 
             encrypted_header_length = struct.pack('!I', len(encrypted_header))
             payload_length = struct.pack('!Q', len(encrypted_data))
-            packet = connection_id + nonce + encrypted_header_length + encrypted_header + payload_length + encrypted_data
+            packet = self.connection_id + nonce + encrypted_header_length + encrypted_header + payload_length + encrypted_data
 
             return packet
 
@@ -364,30 +393,25 @@ class ExProtocol:
             traceback.print_exc()
             print(f"Encryption failed: {e}")
             return None
-        
+
     def decrypt_packet(self, packet: bytes) -> tuple[bytes, dict, str, str]:
         try:
-            # Decode the entire packet using Hamming code
-            decoded_packet = decode_bytes_with_hamming(packet)
-
-            connection_id = decoded_packet[:16]
-            connection_info = self.connections.get(connection_id)
-            if not connection_info:
-                print("connection not found for decryption.")
+            connection_id = packet[:16]
+            if connection_id != self.connection_id:
+                print("Connection ID mismatch.")
                 return None, None, None, None
 
-            if time.time() > connection_info['valid_until']:
-                print("connection expired, please perform a new handshake.")
+            if time.time() > self.valid_until:
+                print("Connection expired, please perform a new handshake.")
                 return None, None, None, None
 
-            connection_key = connection_info['connection_key']
-            nonce = decoded_packet[16:28]
-            encrypted_header_length = struct.unpack('!I', decoded_packet[28:32])[0]
-            encrypted_header = decoded_packet[32:32+encrypted_header_length]
-            payload_length = struct.unpack('!Q', decoded_packet[32+encrypted_header_length:40+encrypted_header_length])[0]
-            ciphertext = decoded_packet[40+encrypted_header_length:40+encrypted_header_length+payload_length]
+            nonce = packet[16:28]
+            encrypted_header_length = struct.unpack('!I', packet[28:32])[0]
+            encrypted_header = packet[32:32+encrypted_header_length]
+            payload_length = struct.unpack('!Q', packet[32+encrypted_header_length:40+encrypted_header_length])[0]
+            ciphertext = packet[40+encrypted_header_length:40+encrypted_header_length+payload_length]
 
-            aesgcm = AESGCM(connection_key)
+            aesgcm = AESGCM(self.connection_key)
             header_json = zlib.decompress(aesgcm.decrypt(nonce, encrypted_header, None))
             header_dict = json.loads(header_json.decode('utf-8'))
 
@@ -402,19 +426,14 @@ class ExProtocol:
                 return None, None, None, None
 
             # Derive packet UUID from the encrypted header
-            packet_uuid = header_dict.get("packet_uuid", hashlib.sha256(decoded_packet).hexdigest())
-
-            # Check for replay attack
-            if packet_uuid in self.processed_uuids:
-                print("Replay attack detected: Packet UUID already processed.")
-                return None, None, None, None
+            packet_uuid = header_dict.get("packet_uuid", hashlib.sha256(packet).hexdigest())
 
             # Determine packet type
             packet_type = bytes([header_dict["type"]])
 
-            if packet_type == self.DATA_FLAG:
+            if packet_type == ExProtocol.DATA_FLAG:
                 print("Processing data packet.")
-            elif packet_type == self.RESPONSE_FLAG:
+            elif packet_type == ExProtocol.RESPONSE_FLAG:
                 print("Processing response packet.")
             else:
                 print("Unknown packet type.")
@@ -426,12 +445,6 @@ class ExProtocol:
             else:
                 plaintext = b''
 
-            # Store the UUID with the current timestamp
-            self.processed_uuids[packet_uuid] = time.time()
-
-            # Cleanup old UUIDs
-            self.cleanup_uuids()
-
             return plaintext, header_dict, packet_type, packet_uuid
         except InvalidSignature:
             print("Decryption failed: Integrity check failed.")
@@ -440,6 +453,7 @@ class ExProtocol:
             traceback.print_exc()
             print(f"Decryption failed: {e}")
             return None, None, None, None
+
 
 # Example usage
 def main():
@@ -462,15 +476,17 @@ def main():
     connection_id_a = protocol_a.complete_handshake(response, node_a_private_key)
 
     print("Handshake completed successfully.")
-    print("connection ID A:", connection_id_a.hex())
-    print("connection ID B:", connection_id_b.hex())
+    print("Connection ID A:", connection_id_a.hex())
+    print("Connection ID B:", connection_id_b.hex())
 
-    encrypted_packet, packet_uuid = protocol_a.create_data_packet(connection_id_a, b'Hello, Node B!')
-    print("Encrypted packet:", encrypted_packet)
+    # Create a data packet
+    data_packet, packet_uuid = protocol_a.create_data_packet(connection_id_a, b'Hello, Node B!')
+    print("Data packet:", data_packet)
     print("Packet UUID:", packet_uuid)
 
-    decrypted_packet, header, flag, packet_uuid_b = protocol_b.decrypt_packet(encrypted_packet)
-    print("Decrypted packet:", decrypted_packet)
+    # Decrypt the data packet
+    decrypted_data, header, flag, packet_uuid_b = protocol_b.decrypt_packet(data_packet)
+    print("Decrypted data:", decrypted_data)
     print("Header:", header)
     print("Flag:", flag)
     print("Packet UUID:", packet_uuid_b)
