@@ -49,21 +49,21 @@ ExProtocol provides a comprehensive framework for establishing secure connection
 |---------------------|------------------------------------|----------------|--------------------------------|
 | Public Key | Node A's public key | 91 | Fixed length |
 | Nonce | Random nonce for PoW | 16 | Fixed length |
-| Type | Packet type identifier | 1 | Fixed length, replaces HPR_FLAG|
+| Type | Packet type identifier | 1 | Fixed length, HPW_RESPONSE_FLAG|
 | Difficulty | PoW difficulty level | 1 | Fixed length |
 
 # 3. Handshake Request (HSK)
 | Field | Description | Length (Bytes) | Notes |
 |---------------------|------------------------------------|----------------|--------------------------------|
 | Public Key | Node A's public key | 91 | Fixed length |
-| Type | Packet type identifier | 1 | Fixed length, replaces HANDSHAKE_FLAG |
+| Type | Packet type identifier | 1 | Fixed length, HANDSHAKE_FLAG |
 | Proof of Work Solution | Solution to PoW challenge | Variable | Last field, no length prefix |
 
 # 4. Handshake Response (HSR)
 | Field | Description | Length (Bytes) | Notes |
 |-----------------------------|------------------------------------|----------------|--------------------------------|
 | Public Key | Node B's public key | 91 | Fixed length |
-| Type | Packet type identifier | 1 | Fixed length, replaces HANDSHAKE_RESPONSE_FLAG |
+| Type | Packet type identifier | 1 | Fixed length, HANDSHAKE_RESPONSE_FLAG |
 | Nonce | Random nonce for connection | 12 | Fixed length |
 | Packet Size Limit Length| Length of packet size limit | 4 | Length prefix |
 | Packet Size Limit | Maximum packet size allowed | Variable | Length-prefixed |
