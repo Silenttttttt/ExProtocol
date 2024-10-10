@@ -10,7 +10,7 @@ class ProtocolWrapper:
 
     def create_handshake_request(self):
         # Create a handshake request and store the private key
-        pow_request, self.private_key = self.protocol.perform_handshake_request()
+        pow_request, self.private_key = self.protocol.initiate_handshake_request()
         if not pow_request:
             raise Exception("Failed to initiate handshake request.")
         if self.private_key is None:
@@ -19,14 +19,14 @@ class ProtocolWrapper:
 
     def respond_handshake(self, pow_request):
         # Respond to a PoW request and generate a new private key
-        pow_challenge, peer_public_key_bytes = self.protocol.perform_pow_challenge(pow_request)
+        pow_challenge, peer_public_key_bytes = self.protocol.create_pow_challenge(pow_request)
         if not pow_challenge:
             raise Exception("Failed to create PoW challenge.")
         return pow_challenge
 
     def complete_handshake_request(self, pow_challenge):
         # Complete the handshake request with PoW solution
-        handshake_request = self.protocol.complete_handshake_request(pow_challenge, self.private_key)
+        handshake_request = self.protocol.complete_pow_request(pow_challenge, self.private_key)
         if not handshake_request:
             raise Exception("Failed to complete handshake request.")
         return handshake_request
@@ -51,14 +51,13 @@ class ProtocolWrapper:
         print(f"Connection ID established: {self.connection_id.hex()}")
 
     def send_data(self, data, header=None):
-
         if isinstance(data, dict):
             data = json.dumps(data).encode('utf-8')
 
         if not self.connection_id:
             raise Exception("No active connection. Please initiate a handshake first.")
 
-        encrypted_message, packet_uuid = self.protocol.generate_data_packet(self.connection_id, data, header)
+        encrypted_message, packet_uuid = self.protocol.connections[self.connection_id].create_data_packet(data, header)
         if encrypted_message is None:
             raise Exception("Failed to encrypt message.")
 
@@ -69,7 +68,7 @@ class ProtocolWrapper:
             raise Exception("No active connection. Please initiate a handshake first.")
 
         response_data = json.dumps(data).encode('utf-8')
-        encrypted_message = self.protocol.generate_response_packet(self.connection_id, response_data, original_packet_uuid, header)
+        encrypted_message = self.protocol.connections[self.connection_id].create_response_packet(response_data, original_packet_uuid, header)
         if encrypted_message is None:
             raise Exception("Failed to encrypt message.")
 
@@ -79,30 +78,29 @@ class ProtocolWrapper:
         if not self.connection_id:
             raise Exception("No active connection. Please initiate a handshake first.")
 
-        decrypted_data, header, flag, packet_uuid = self.protocol.decrypt_packet(encrypted_data_packet)
-        if decrypted_data is None:
+        packet = self.protocol.connections[self.connection_id].decrypt_packet(encrypted_data_packet)
+        if packet is None:
             raise Exception("Failed to decrypt data packet.")
 
-        if flag != self.protocol.DATA_FLAG:
+        if packet.packet_type != ExProtocol.DATA_FLAG:
             raise Exception("Invalid flag for data packet.")
 
-        data = json.loads(decrypted_data.decode(header['encoding']))
-        return data, header, packet_uuid
+        data = json.loads(packet.payload.decode(packet.header_dict['encoding']))
+        return data, packet.header_dict, packet.packet_uuid
 
     def decrypt_response(self, encrypted_response_packet):
         if not self.connection_id:
             raise Exception("No active connection. Please initiate a handshake first.")
 
-        decrypted_response, header, flag, packet_uuid = self.protocol.decrypt_packet(encrypted_response_packet)
-        if decrypted_response is None:
+        packet = self.protocol.connections[self.connection_id].decrypt_packet(encrypted_response_packet)
+        if packet is None:
             raise Exception("Failed to decrypt response packet.")
 
-        if flag != self.protocol.RESPONSE_FLAG:
+        if packet.packet_type != ExProtocol.RESPONSE_FLAG:
             raise Exception("Invalid flag for response packet.")
 
-        response = json.loads(decrypted_response.decode(header['encoding']))
-        return response, header, packet_uuid
-
+        response = json.loads(packet.payload.decode(packet.header_dict['encoding']))
+        return response, packet.header_dict, packet.packet_uuid
 
 
 # Example usage
