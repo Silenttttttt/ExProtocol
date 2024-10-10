@@ -18,7 +18,7 @@ ExProtocol provides a comprehensive framework for establishing secure connection
 ### Installation
 1. Clone the repository:
    ```
-   git clone https://github.com/yourusername/ExProtocol.git
+   git clone https://github.com/Silenttttttt/ExProtocol.git
    ```
 2. Navigate to the project directory:
    ```
@@ -79,15 +79,15 @@ Encrypted Handshake Data Fields
 
 # 5. General data packet structure
 
-| Field | Description | Length (Bytes) | Encrypted |
+| Field                  | Description                                      | Length (Bytes) | Encrypted |
 |------------------------|--------------------------------------------------|----------------|-----------|
-| Version | Protocol version number | 1 | No |
-| Connection ID | Unique identifier for the connection | 16 | No |
-| Nonce | Random value for encryption | 12 | No |
-| Encrypted Header Length| Length of the encrypted header | 4 | No |
-| Encrypted Header | Contains metadata and control information | Variable | Yes |
-| Payload Length | Length of the encrypted payload | 8 | No |
-| Payload | The main data being transmitted | Variable | Yes |
+| Version                | Protocol version number                          | 1              | No        |
+| Connection ID          | Unique identifier for the connection             | 16             | No        |
+| Nonce                  | Random value for encryption                      | 12             | No        |
+| Encrypted Header Length| Length of the encrypted header                   | 4              | No        |
+| Encrypted Header       | Contains metadata and control information        | Variable       | Yes       |
+| Payload Length         | Length of the encrypted payload                  | 8              | No        |
+| Payload                | The main data being transmitted                  | Variable       | Yes       |
 
 ## Encrypted Header Fields
 
@@ -108,6 +108,7 @@ Encrypted Handshake Data Fields
 - **Type**: Set to indicate a response packet
 - **Data Type**: Specifies the type of data (e.g., text, binary)
 - **Status Code**: Required field indicating the status of the response (e.g., HTTP-like status codes)
+- **Packet UUID**: The hash of the packet it is responding to, used for tracking and validation, derived by both parties independently.
 
 ### Encrypted Header Fields for Response Packet
 
@@ -118,6 +119,7 @@ Encrypted Handshake Data Fields
 | Type        | Indicates the nature of the packet (response)                               |
 | Data Type   | Specifies the type of data being transmitted (e.g., text, binary)           |
 | Status Code | Indicates the status of the response (e.g., 200, 500)                       |
+| Packet UUID | The hash of the packet it is responding to, used for tracking and validation|
 
 
 
@@ -126,6 +128,3 @@ Contributions are welcome! Please fork the repository and submit a pull request 
 
 ## License
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Acknowledgments
-- Thanks to the contributors and the open-source community for their support and inspiration.
