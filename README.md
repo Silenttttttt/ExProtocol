@@ -18,7 +18,7 @@ ExProtocol provides a comprehensive framework for establishing secure connection
 ### Installation
 1. Clone the repository:
    ```
-   git clone https://github.com/yourusername/ExProtocol.git
+   git clone https://github.com/Silenttttttt/ExProtocol.git
    ```
 2. Navigate to the project directory:
    ```
@@ -128,6 +128,3 @@ Contributions are welcome! Please fork the repository and submit a pull request 
 
 ## License
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Acknowledgments
-- Thanks to the contributors and the open-source community for their support and inspiration.
