@@ -243,6 +243,12 @@ class Packet:
             # Determine packet family
             packet_family = 'data' if packet_type == ExProtocol.DATA_FLAG else 'response'
 
+            if header_dict['timestamp'] > time.time():
+                raise ValueError("Packet timestamp is in the future.")
+
+            if header_dict['timestamp'] < time.time() - ExProtocol.PACKET_VALIDITY_PERIOD:
+                raise ValueError("Packet timestamp is too old.")
+
             # Decrypt the payload
             plaintext = zlib.decompress(aesgcm.decrypt(nonce, encrypted_payload, None))
 
@@ -375,6 +381,8 @@ class ExProtocol:
     POW_TIMEOUT = 20
     MAX_PACKET_SIZE = 8192
     PUBLIC_KEY_SIZE = 91
+
+    PACKET_VALIDITY_PERIOD = 60 # 1 minute
 
     PROTOCOL_VERSION = b'\x01'  
 
