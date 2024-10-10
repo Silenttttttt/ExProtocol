@@ -14,7 +14,7 @@ from c_hamming import encode_bytes_with_hamming, decode_bytes_with_hamming
 
 
 class Packet:
-    def __init__(self, packet_type, payload: bytes = None, public_key: bytes = None, nonce: bytes = None, packet_size_limit: int = None, encrypted_data: bytes = None, header_dict: dict = None, packet_uuid: str = None, packet_family: str = None, timestamp: int = None, encoding: str = 'utf-8', data_type: str = 'text', status_code: int = 200, connection_key: bytes = None):
+    def __init__(self, packet_type, payload: bytes = None, public_key: bytes = None, nonce: bytes = None, packet_size_limit: int = None, encrypted_data: bytes = None, header_dict: dict = None, packet_uuid: str = None, packet_family: str = None, timestamp: int = None, encoding: str = 'utf-8', data_type: str = 'text', status_code: int = 200, connection_key: bytes = None, connection_id: bytes = None):
         self.packet_type = packet_type
         self.payload = payload  # Plaintext payload
         self.public_key = public_key
@@ -28,8 +28,8 @@ class Packet:
         self.packet_validity = 20  # Validity period in seconds
         self.last_generated_time = None
 
-
         self.connection_key = connection_key  # Attribute for private connection key
+        self.connection_id = connection_id
 
         # Header attributes
         self.timestamp = timestamp or int(time.time())
@@ -149,8 +149,12 @@ class Packet:
 
 
     @staticmethod
-    def decrypt(encrypted_packet: bytes, connection_key: bytes, expected_connection_id: bytes) -> 'Packet':
+    def decrypt(encrypted_packet: bytes, connection: 'Connection') -> 'Packet':
         try:
+
+            connection_key = connection.connection_key
+            connection_id = connection.connection_id
+
             # Decode the packet using Hamming
             packet_bytes = decode_bytes_with_hamming(encrypted_packet)
 
@@ -161,14 +165,30 @@ class Packet:
             encrypted_header_length_start = nonce_end
             encrypted_header_length_end = encrypted_header_length_start + ExProtocol.ENCRYPTED_HEADER_LENGTH_SIZE
 
+
+            # Derive packet UUID by hashing the decoded packet
+            packet_uuid = hashlib.sha256(packet_bytes).hexdigest()
+
+
+
+            # Check for replay attack
+            if packet_uuid in connection.processed_uuids:
+                print("Replay attack detected: Packet UUID already processed.")
+                return None
+
+            # Store the UUID with the current timestamp
+            connection.processed_uuids[packet_uuid] = time.time()
+
+            connection.cleanup_uuids()
+
             # Extract and verify the protocol version
             version = packet_bytes[:version_end]
             if version != ExProtocol.PROTOCOL_VERSION:
                 raise ValueError("Unsupported protocol version.")
 
             # Extract the connection ID
-            connection_id = packet_bytes[version_end:connection_id_end]
-            if connection_id != expected_connection_id:
+            extracted_connection_id = packet_bytes[version_end:connection_id_end]
+            if connection_id != extracted_connection_id:
                 raise ValueError("Connection ID mismatch.")
 
             # Extract the nonce
@@ -236,7 +256,8 @@ class Packet:
                 nonce=nonce,
                 header_dict=header_dict,
                 packet_uuid=packet_uuid,
-                packet_family=packet_family
+                packet_family=packet_family,
+                connection_id=connection_id
             )
 
             return packet
@@ -370,11 +391,7 @@ class ExProtocol:
     def __init__(self):
         self.connections = {}
         self.nonce_store = {}
-        self.processed_uuids = {}
 
-    def cleanup_uuids(self):
-        current_time = time.time()
-        self.processed_uuids = {uuid: ts for uuid, ts in self.processed_uuids.items() if current_time - ts < 60}
 
     def generate_key_pair(self):
         try:
@@ -546,7 +563,7 @@ class ExProtocol:
         )
 
         # Initialize the connection for Node B
-        self.initialize_connection(connection_id, connection_key, valid_until, private_key, self.MAX_PACKET_SIZE, max_packet_size)
+        self.initialize_connection(connection_id, connection_key, valid_until, private_key, self.MAX_PACKET_SIZE, max_packet_size, self)
 
         return handshake_response_packet.encode_handshake_response(), private_key, connection_id
 
@@ -575,21 +592,28 @@ class ExProtocol:
         max_packet_size = handshake_info['max_packet_size']
 
         # Initialize the connection
-        self.initialize_connection(connection_id, connection_key, valid_until, private_key, self.MAX_PACKET_SIZE, max_packet_size)
+        self.initialize_connection(connection_id, connection_key, valid_until, private_key, self.MAX_PACKET_SIZE, max_packet_size, self)
 
         return connection_id
 
-    def initialize_connection(self, connection_id, connection_key, valid_until, private_key, max_packet_size_a, max_packet_size_b):
-        self.connections[connection_id] = Connection(connection_id, connection_key, min(max_packet_size_a, max_packet_size_b), private_key, valid_until)
+    def initialize_connection(self, connection_id, connection_key, valid_until, private_key, max_packet_size_a, max_packet_size_b, protocol):
+        self.connections[connection_id] = Connection(connection_id, connection_key, min(max_packet_size_a, max_packet_size_b), private_key, valid_until, protocol)
 
 
 class Connection:
-    def __init__(self, connection_id, connection_key, max_packet_size, private_key, valid_until):
+    def __init__(self, connection_id, connection_key, max_packet_size, private_key, valid_until, protocol):
+        self.protocol = protocol
         self.connection_id = connection_id
         self.connection_key = connection_key
         self.max_packet_size = max_packet_size
         self.private_key = private_key
         self.valid_until = valid_until
+        self.processed_uuids = {}
+
+    def cleanup_uuids(self):
+        current_time = time.time()
+        self.processed_uuids = {uuid: ts for uuid, ts in self.processed_uuids.items() if current_time - ts < 60}
+
 
     def create_data_packet(self, data=None, header=None, connection_id=None):
         if connection_id is None:
@@ -652,7 +676,8 @@ class Connection:
         return encoded_packet
 
     def decrypt_packet(self, encrypted_packet: bytes) -> Packet:
-        return Packet.decrypt(encrypted_packet, self.connection_key, self.connection_id)
+        self.cleanup_uuids()
+        return Packet.decrypt(encrypted_packet, self)
 
 
 # Example usage
@@ -685,11 +710,21 @@ def main():
     print("Packet UUID:", packet_uuid)
 
     # Decrypt the data packet
-    packet = protocol_b.connections[connection_id_b].decrypt_packet(data_packet)
-    print("Decrypted data:", packet.payload)
+    decrypted_packet = protocol_b.connections[connection_id_b].decrypt_packet(data_packet)
+    print("Decrypted data:", decrypted_packet.payload)
+    print("Header:", decrypted_packet.header_dict)
+    print("Packet type:", decrypted_packet.packet_type)
+    print("Packet UUID:", decrypted_packet.packet_uuid)
+
+    # Create a response packet
+    response_packet = protocol_b.connections[connection_id_b].create_response_packet(b'Hello, Node A!', original_packet_uuid=decrypted_packet.packet_uuid)
+  #  print("Response packet:", response_packet)
+    print("Response packet UUID:", packet_uuid)
+
+    # Decrypt the response packet
+    packet = protocol_a.connections[connection_id_a].decrypt_packet(response_packet)
+    print("Decrypted response:", packet.payload)
     print("Header:", packet.header_dict)
-    print("Packet type:", packet.packet_type)
-    print("Packet UUID:", packet.packet_uuid)
 
 
 if __name__ == "__main__":
