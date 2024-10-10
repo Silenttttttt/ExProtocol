@@ -79,14 +79,15 @@ Encrypted Handshake Data Fields
 
 # 5. General data packet structure
 
-| Field                   | Description                                                                 | Length (Bytes) | Encrypted |
-|-------------------------|-----------------------------------------------------------------------------|----------------|-----------|
-| Version                 | Protocol version number                                                     | 1              | No        |
-| Connection ID           | Unique identifier for the connection                                           | 16             | No        |
-| Encrypted Header Length | Length of the encrypted header                                              | 4              | No        |
-| Encrypted Header        | Contains metadata and control information                                   | Variable       | Yes       |
-| Payload Length          | Length of the encrypted payload                                             | 8              | No        |
-| Payload                 | The main data being transmitted                                             | Variable       | Yes       |
+| Field | Description | Length (Bytes) | Encrypted |
+|------------------------|--------------------------------------------------|----------------|-----------|
+| Version | Protocol version number | 1 | No |
+| Connection ID | Unique identifier for the connection | 16 | No |
+| Nonce | Random value for encryption | 12 | No |
+| Encrypted Header Length| Length of the encrypted header | 4 | No |
+| Encrypted Header | Contains metadata and control information | Variable | Yes |
+| Payload Length | Length of the encrypted payload | 8 | No |
+| Payload | The main data being transmitted | Variable | Yes |
 
 ## Encrypted Header Fields
 
