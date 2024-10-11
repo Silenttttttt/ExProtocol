@@ -36,6 +36,8 @@ class Packet:
         self.data_type = data_type
         self.status_code = status_code
 
+
+
     def prepare_for_encryption(self):
         """Prepare the packet for encryption by ensuring all necessary attributes are set."""
         if not self.header_dict or self.packet_type is None:
@@ -47,13 +49,21 @@ class Packet:
         # Check if the packet_payload needs to be regenerated
         current_time = time.time()
         if self.packet_payload is None or (self.last_generated_time and (current_time - self.last_generated_time > self.packet_validity)):
-            self.generate_packet_payload()
+            self.generate_packet()
             self.last_generated_time = current_time
 
-    def generate_packet_payload(self):
-        """Generate the packet payload based on the current attributes."""
-        if not self.payload:
-            raise ValueError("Payload must be set before generating packet payload.")
+    def generate_packet(self, connection: 'Connection' = None) -> bytes:
+        """Encrypt the packet using the attributes like header_dict and packet_type."""
+
+        if not self.connection and not connection:
+            raise ValueError("Connection must be provided.")
+        
+        if connection:
+            self.connection = connection
+
+        if not self.nonce:
+            self.nonce = self.connection.generate_unique_nonce()
+        
         
         # Use the connection's key
         key_to_use = self.connection.connection_key
@@ -61,54 +71,6 @@ class Packet:
             raise ValueError("Connection key must be provided.")
 
         # Construct the header using attributes or provided header_dict
-        self.header_dict.update({
-            "timestamp": self.timestamp,
-            "encoding": self.encoding,
-            "type": self.packet_type,
-            "data_type": self.data_type
-        })
-        
-        if self.packet_family == 'response':
-            self.header_dict["status_code"] = self.status_code
-
-        header_json = zlib.compress(json.dumps(self.header_dict).encode('utf-8'))
-        
-        # Handle packet_type as bytes or int
-        if isinstance(self.packet_type, int):
-            packet_type_bytes = struct.pack('!I', self.packet_type)
-        else:
-            packet_type_bytes = self.packet_type
-
-        # Initialize AESGCM for encryption
-        aesgcm = AESGCM(key_to_use)
-
-        # Compress and encrypt the payload
-        compressed_payload = zlib.compress(self.payload)
-        encrypted_payload = aesgcm.encrypt(self.nonce, compressed_payload, None)
-        
-        # Calculate the length of the encrypted payload
-        encrypted_payload_length = len(encrypted_payload)
-
-        self.packet_payload = (
-            packet_type_bytes +
-            self.nonce +
-            struct.pack('!I', len(header_json)) +
-            header_json +
-            struct.pack('!Q', encrypted_payload_length) +
-            encrypted_payload
-        )
-
-
-
-    def generate_packet(self, connection: 'Connection' = None) -> bytes:
-        """Encrypt the packet using the attributes like header_dict and packet_type."""
-        if connection:
-            self.connection = connection
-        
-        self.prepare_for_encryption()
-        aesgcm = AESGCM(self.connection.connection_key)
-        
-        # Use self.header_dict if it's not empty, otherwise construct the header from attributes
         if self.header_dict:
             header_dict = self.header_dict
         else:
@@ -125,6 +87,7 @@ class Packet:
         header_json = zlib.compress(json.dumps(header_dict).encode('utf-8'))
         
         # Encrypt the header
+        aesgcm = AESGCM(key_to_use)
         encrypted_header = aesgcm.encrypt(self.nonce, header_json, None)
         
         # Calculate the length of the encrypted header
@@ -168,6 +131,9 @@ class Packet:
         )
         
         return packet
+
+
+
 
 
     @staticmethod
