@@ -14,7 +14,7 @@ from c_hamming import encode_bytes_with_hamming, decode_bytes_with_hamming
 
 
 class Packet:
-    def __init__(self, packet_type, payload: bytes = None, public_key: bytes = None, nonce: bytes = None, packet_size_limit: int = None, encrypted_data: bytes = None, header_dict: dict = None, packet_uuid: str = None, packet_family: str = None, timestamp: int = None, encoding: str = 'utf-8', data_type: str = 'text', status_code: int = 200, connection_key: bytes = None, connection_id: bytes = None):
+    def __init__(self, packet_type, payload: bytes = None, public_key: bytes = None, nonce: bytes = None, packet_size_limit: int = None, encrypted_data: bytes = None, header_dict: dict = None, packet_uuid: str = None, packet_family: str = None, timestamp: int = None, encoding: str = 'utf-8', data_type: str = 'text', status_code: int = 200, connection: 'Connection' = None):
         self.packet_type = packet_type
         self.payload = payload  # Plaintext payload
         self.public_key = public_key
@@ -28,8 +28,7 @@ class Packet:
         self.packet_validity = 20  # Validity period in seconds
         self.last_generated_time = None
 
-        self.connection_key = connection_key  # Attribute for private connection key
-        self.connection_id = connection_id
+        self.connection = connection
 
         # Header attributes
         self.timestamp = timestamp or int(time.time())
@@ -37,27 +36,27 @@ class Packet:
         self.data_type = data_type
         self.status_code = status_code
 
-    def prepare_for_encryption(self, connection_key: bytes = None):
+    def prepare_for_encryption(self):
         """Prepare the packet for encryption by ensuring all necessary attributes are set."""
         if not self.header_dict or self.packet_type is None:
             raise ValueError("Header dictionary and packet type must be set.")
         
         if not self.nonce:
-            self.nonce = os.urandom(ExProtocol.NONCE_LENGTH)  # Generate a nonce if not set
+            self.nonce = self.connection.generate_unique_nonce()
         
         # Check if the packet_payload needs to be regenerated
         current_time = time.time()
         if self.packet_payload is None or (self.last_generated_time and (current_time - self.last_generated_time > self.packet_validity)):
-            self.generate_packet_payload(connection_key)
+            self.generate_packet_payload()
             self.last_generated_time = current_time
 
-    def generate_packet_payload(self, connection_key: bytes = None):
+    def generate_packet_payload(self):
         """Generate the packet payload based on the current attributes."""
         if not self.payload:
             raise ValueError("Payload must be set before generating packet payload.")
         
-        # Use the provided connection key or the attribute
-        key_to_use = connection_key or self.connection_key
+        # Use the connection's key
+        key_to_use = self.connection.connection_key
         if not key_to_use:
             raise ValueError("Connection key must be provided.")
 
@@ -100,10 +99,14 @@ class Packet:
         )
 
 
-    def generate_packet(self, connection_key: bytes) -> bytes:
+
+    def generate_packet(self, connection: 'Connection' = None) -> bytes:
         """Encrypt the packet using the attributes like header_dict and packet_type."""
-        self.prepare_for_encryption(connection_key)
-        aesgcm = AESGCM(connection_key)
+        if connection:
+            self.connection = connection
+        
+        self.prepare_for_encryption()
+        aesgcm = AESGCM(self.connection.connection_key)
         
         # Use self.header_dict if it's not empty, otherwise construct the header from attributes
         if self.header_dict:
@@ -127,21 +130,40 @@ class Packet:
         # Calculate the length of the encrypted header
         encrypted_header_length = len(encrypted_header)
         
-        # Compress and encrypt the payload
-        compressed_payload = zlib.compress(self.payload)
-        encrypted_payload = aesgcm.encrypt(self.nonce, compressed_payload, None)
+        # Check if payload is empty
+        if self.payload:
+            # Compress and encrypt the payload
+            compressed_payload = zlib.compress(self.payload)
+            encrypted_payload = aesgcm.encrypt(self.nonce, compressed_payload, None)
+            encrypted_payload_length = len(encrypted_payload)
+        else:
+            encrypted_payload = b''
+            encrypted_payload_length = 0
+
+        # Ensure nonce and connection ID lengths are correct
+        if len(self.nonce) != ExProtocol.NONCE_LENGTH:
+            raise ValueError(f"Nonce length must be {ExProtocol.NONCE_LENGTH} bytes.")
+        if len(self.public_key) != ExProtocol.CONNECTION_ID_LENGTH:
+            raise ValueError(f"Connection ID length must be {ExProtocol.CONNECTION_ID_LENGTH} bytes.")
         
-        # Calculate the length of the encrypted payload
-        encrypted_payload_length = len(encrypted_payload)
+        # Validate length fields
+        if encrypted_header_length >= 2**(8 * ExProtocol.ENCRYPTED_HEADER_LENGTH_SIZE):
+            raise ValueError(f"Encrypted header length exceeds maximum representable size of {ExProtocol.ENCRYPTED_HEADER_LENGTH_SIZE} bytes.")
+        if encrypted_payload_length >= 2**(8 * ExProtocol.PAYLOAD_LENGTH_SIZE):
+            raise ValueError(f"Encrypted payload length exceeds maximum representable size of {ExProtocol.PAYLOAD_LENGTH_SIZE} bytes.")
+        
+        # Convert lengths to bytes
+        encrypted_header_length_bytes = encrypted_header_length.to_bytes(ExProtocol.ENCRYPTED_HEADER_LENGTH_SIZE, 'big')
+        encrypted_payload_length_bytes = encrypted_payload_length.to_bytes(ExProtocol.PAYLOAD_LENGTH_SIZE, 'big')
         
         # Construct the final packet structure with version at the beginning
         packet = (
             ExProtocol.PROTOCOL_VERSION +
             self.public_key +  # Assuming public_key is used as connection ID
             self.nonce +
-            struct.pack('!I', encrypted_header_length) +  # Correctly encode the length of the encrypted header
+            encrypted_header_length_bytes +
             encrypted_header +
-            struct.pack('!Q', encrypted_payload_length) +  # Include the encrypted payload length
+            encrypted_payload_length_bytes +
             encrypted_payload
         )
         
@@ -151,7 +173,6 @@ class Packet:
     @staticmethod
     def decrypt(encrypted_packet: bytes, connection: 'Connection') -> 'Packet':
         try:
-
             connection_key = connection.connection_key
             connection_id = connection.connection_id
 
@@ -165,11 +186,8 @@ class Packet:
             encrypted_header_length_start = nonce_end
             encrypted_header_length_end = encrypted_header_length_start + ExProtocol.ENCRYPTED_HEADER_LENGTH_SIZE
 
-
             # Derive packet UUID by hashing the decoded packet
             packet_uuid = hashlib.sha256(packet_bytes).hexdigest()
-
-
 
             # Check for replay attack
             if packet_uuid in connection.processed_uuids:
@@ -249,8 +267,11 @@ class Packet:
             if header_dict['timestamp'] < time.time() - ExProtocol.PACKET_VALIDITY_PERIOD:
                 raise ValueError("Packet timestamp is too old.")
 
-            # Decrypt the payload
-            plaintext = zlib.decompress(aesgcm.decrypt(nonce, encrypted_payload, None))
+            # Decrypt the payload if it exists
+            if payload_length > 0:
+                plaintext = zlib.decompress(aesgcm.decrypt(nonce, encrypted_payload, None))
+            else:
+                plaintext = b''
 
             # Generate packet UUID for data packets
             packet_uuid = hashlib.sha256(packet_bytes).hexdigest() if packet_family == 'data' else header_dict.get("packet_uuid")
@@ -263,7 +284,7 @@ class Packet:
                 header_dict=header_dict,
                 packet_uuid=packet_uuid,
                 packet_family=packet_family,
-                connection_id=connection_id
+                connection=connection
             )
 
             return packet
@@ -275,7 +296,6 @@ class Packet:
             traceback.print_exc()
             print(f"Decryption failed: {e}")
             return None
-
 
     def encode_hpw_request(self) -> bytes:
         """Encode an Initiator PoW Request packet."""
@@ -351,17 +371,6 @@ class Packet:
         
         return Packet(packet_type, b'', public_key, nonce, packet_size_limit, encrypted_data)
 
-    def encrypt_with_payload(self, connection_key: bytes) -> bytes:
-        """Encrypt the packet using the payload directly."""
-        if not isinstance(connection_key, bytes):
-            raise ValueError("Connection key must be bytes")
-        if not self.payload:
-            raise ValueError("Payload is empty")
-
-        aesgcm = AESGCM(connection_key)
-        nonce = os.urandom(ExProtocol.NONCE_LENGTH)
-        encrypted_payload = aesgcm.encrypt(nonce, self.payload, None)
-        return nonce + encrypted_payload
 
 
 
@@ -617,11 +626,19 @@ class Connection:
         self.private_key = private_key
         self.valid_until = valid_until
         self.processed_uuids = {}
+        self.used_nonces = set()
 
     def cleanup_uuids(self):
         current_time = time.time()
         self.processed_uuids = {uuid: ts for uuid, ts in self.processed_uuids.items() if current_time - ts < 60}
 
+    def generate_unique_nonce(self):
+        """Generate a unique nonce for this connection."""
+        while True:
+            nonce = os.urandom(ExProtocol.NONCE_LENGTH)
+            if nonce not in self.used_nonces:
+                self.used_nonces.add(nonce)
+                return nonce
 
     def create_data_packet(self, data=None, header=None, connection_id=None):
         if connection_id is None:
@@ -642,7 +659,7 @@ class Connection:
             header_dict=default_header,
             public_key=connection_id  # Use connection_id as the public key
         )
-        encrypted_packet = packet.generate_packet(self.connection_key)
+        encrypted_packet = packet.generate_packet(self)
 
         if encrypted_packet is None:
             raise Exception("Failed to create data packet.")
@@ -675,7 +692,7 @@ class Connection:
             public_key=connection_id,  # Use connection_id as the public key
             status_code=default_header['status_code']
         )
-        encrypted_packet = packet.generate_packet(self.connection_key)
+        encrypted_packet = packet.generate_packet(self)
 
         if encrypted_packet is None:
             raise Exception("Failed to create response packet.")
