@@ -13,13 +13,14 @@ import traceback
 from c_hamming import encode_bytes_with_hamming, decode_bytes_with_hamming
 from typing import Optional, Tuple, Dict, Any
 
-
 class Packet:
-    def __init__(self, packet_type: int, payload: Optional[bytes] = None, public_key: Optional[bytes] = None, nonce: Optional[bytes] = None, packet_size_limit: Optional[int] = None, encrypted_data: Optional[bytes] = None, header_dict: Optional[Dict[str, Any]] = None, packet_uuid: Optional[str] = None, packet_family: Optional[str] = None, timestamp: Optional[int] = None, encoding: str = 'utf-8', data_type: str = 'text', status_code: int = 200, connection: Optional['Connection'] = None):
+    def __init__(self, packet_type: int, payload: Optional[bytes] = None, public_key: Optional[bytes] = None, header_nonce: Optional[bytes] = None, payload_nonce: Optional[bytes] = None, packet_size_limit: Optional[int] = None, encrypted_data: Optional[bytes] = None, header_dict: Optional[Dict[str, Any]] = None, packet_uuid: Optional[str] = None, packet_family: Optional[str] = None, timestamp: Optional[int] = None, encoding: str = 'utf-8', data_type: str = 'text', status_code: int = 200, connection: Optional['Connection'] = None, pow_nonce: Optional[bytes] = None, difficulty: Optional[int] = None):
         self.packet_type = packet_type
         self.payload = payload  # Plaintext payload
         self.public_key = public_key
-        self.nonce = nonce
+        self.header_nonce = header_nonce
+        self.payload_nonce = payload_nonce
+        self.pow_nonce = pow_nonce
         self.packet_size_limit = packet_size_limit
         self.encrypted_data = encrypted_data
         self.header_dict = header_dict or {}
@@ -28,6 +29,7 @@ class Packet:
         self.packet_payload = None  # Structured data to be encrypted
         self.packet_validity = 20  # Validity period in seconds
         self.last_generated_time = None
+        self.difficulty = difficulty
 
         self.connection = connection
 
@@ -42,25 +44,31 @@ class Packet:
         if not self.header_dict or self.packet_type is None:
             raise ValueError("Header dictionary and packet type must be set.")
         
-        if not self.nonce:
-            self.nonce = self.connection.generate_unique_nonce()
+        if not self.header_nonce:
+            self.header_nonce = self.connection.generate_unique_nonce()
+        
+        if not self.payload_nonce:
+            self.payload_nonce = self.connection.generate_unique_nonce()
         
         # Check if the packet_payload needs to be regenerated
         current_time = time.time()
         if self.packet_payload is None or (self.last_generated_time and (current_time - self.last_generated_time > self.packet_validity)):
-            self.generate_packet()
             self.last_generated_time = current_time
+
 
     def generate_packet(self, connection: Optional['Connection'] = None) -> bytes:
         """Encrypt the packet using the attributes like header_dict and packet_type."""
+
         if not self.connection and not connection:
             raise ValueError("Connection must be provided.")
         
         if connection:
             self.connection = connection
-        
-        if not self.nonce:
-            self.nonce = self.connection.generate_unique_nonce()
+
+        # Ensure the packet is prepared for encryption
+        self.prepare_for_encryption()
+
+
         
         # Use the connection's key
         key_to_use = self.connection.connection_key
@@ -85,7 +93,7 @@ class Packet:
         
         # Encrypt the header
         aesgcm = AESGCM(key_to_use)
-        encrypted_header = aesgcm.encrypt(self.nonce, header_json, None)
+        encrypted_header = aesgcm.encrypt(self.header_nonce, header_json, None)
         
         # Calculate the length of the encrypted header
         encrypted_header_length = len(encrypted_header)
@@ -94,15 +102,13 @@ class Packet:
         if self.payload:
             # Compress and encrypt the payload
             compressed_payload = zlib.compress(self.payload)
-            encrypted_payload = aesgcm.encrypt(self.nonce, compressed_payload, None)
+            encrypted_payload = aesgcm.encrypt(self.payload_nonce, compressed_payload, None)
             encrypted_payload_length = len(encrypted_payload)
         else:
             encrypted_payload = b''
             encrypted_payload_length = 0
 
         # Ensure nonce and connection ID lengths are correct
-        if len(self.nonce) != ExProtocol.NONCE_LENGTH:
-            raise ValueError(f"Nonce length must be {ExProtocol.NONCE_LENGTH} bytes.")
         if len(self.public_key) != ExProtocol.CONNECTION_ID_LENGTH:
             raise ValueError(f"Connection ID length must be {ExProtocol.CONNECTION_ID_LENGTH} bytes.")
         
@@ -120,14 +126,17 @@ class Packet:
         packet = (
             ExProtocol.PROTOCOL_VERSION +
             self.public_key +  # Assuming public_key is used as connection ID
-            self.nonce +
+            self.header_nonce +
             encrypted_header_length_bytes +
             encrypted_header +
+            self.payload_nonce +
             encrypted_payload_length_bytes +
             encrypted_payload
         )
         
         return packet
+
+
 
     @staticmethod
     def decrypt(encrypted_packet: bytes, connection: 'Connection') -> Optional['Packet']:
@@ -141,8 +150,8 @@ class Packet:
             # Calculate offsets
             version_end = ExProtocol.VERSION_LENGTH
             connection_id_end = version_end + ExProtocol.CONNECTION_ID_LENGTH
-            nonce_end = connection_id_end + ExProtocol.NONCE_LENGTH
-            encrypted_header_length_start = nonce_end
+            header_nonce_end = connection_id_end + ExProtocol.NONCE_LENGTH
+            encrypted_header_length_start = header_nonce_end
             encrypted_header_length_end = encrypted_header_length_start + ExProtocol.ENCRYPTED_HEADER_LENGTH_SIZE
 
             # Derive packet UUID by hashing the decoded packet
@@ -168,8 +177,8 @@ class Packet:
             if connection_id != extracted_connection_id:
                 raise ValueError("Connection ID mismatch.")
 
-            # Extract the nonce
-            nonce = packet_bytes[connection_id_end:nonce_end]
+            # Extract the header nonce
+            header_nonce = packet_bytes[connection_id_end:header_nonce_end]
 
             # Extract the encrypted header length
             encrypted_header_length_bytes = packet_bytes[encrypted_header_length_start:encrypted_header_length_end]
@@ -180,8 +189,13 @@ class Packet:
             encrypted_header_end = encrypted_header_start + encrypted_header_length
             encrypted_header = packet_bytes[encrypted_header_start:encrypted_header_end]
 
+            # Extract the payload nonce
+            payload_nonce_start = encrypted_header_end
+            payload_nonce_end = payload_nonce_start + ExProtocol.NONCE_LENGTH
+            payload_nonce = packet_bytes[payload_nonce_start:payload_nonce_end]
+
             # Calculate the start and end of the payload length
-            payload_length_start = encrypted_header_end
+            payload_length_start = payload_nonce_end
             payload_length_end = payload_length_start + ExProtocol.PAYLOAD_LENGTH_SIZE
 
             # Ensure the packet is long enough to contain the payload length
@@ -201,7 +215,7 @@ class Packet:
             aesgcm = AESGCM(connection_key)
 
             # Decrypt the header
-            header_json = zlib.decompress(aesgcm.decrypt(nonce, encrypted_header, None))
+            header_json = zlib.decompress(aesgcm.decrypt(header_nonce, encrypted_header, None))
             header_dict = json.loads(header_json.decode('utf-8'))
 
             # Determine packet type
@@ -228,7 +242,7 @@ class Packet:
 
             # Decrypt the payload if it exists
             if payload_length > 0:
-                plaintext = zlib.decompress(aesgcm.decrypt(nonce, encrypted_payload, None))
+                plaintext = zlib.decompress(aesgcm.decrypt(payload_nonce, encrypted_payload, None))
             else:
                 plaintext = b''
 
@@ -239,7 +253,8 @@ class Packet:
             packet = Packet(
                 packet_type=packet_type,
                 payload=plaintext,
-                nonce=nonce,
+                header_nonce=header_nonce,
+                payload_nonce=payload_nonce,
                 header_dict=header_dict,
                 packet_uuid=packet_uuid,
                 packet_family=packet_family,
@@ -256,29 +271,51 @@ class Packet:
             print(f"Decryption failed: {e}")
             return None
 
+
+
     def encode_hpw_request(self) -> bytes:
         """Encode an Initiator PoW Request packet."""
-        packet = self.public_key + self.packet_type + struct.pack('!I', self.packet_size_limit)
+        packet = (
+            self.public_key +
+            self.packet_type +
+            struct.pack('!I', self.packet_size_limit)
+        )
         return encode_bytes_with_hamming(packet)
 
     def encode_hpw_response(self) -> bytes:
         """Encode a Responder PoW Challenge packet."""
-        packet = self.public_key + self.nonce + self.packet_type + self.encrypted_data
-        return encode_bytes_with_hamming(packet)
 
+        #self.pow_nonce = os.urandom(ExProtocol.NONCE_POW_LENGTH)
+
+        packet = (
+            self.public_key +
+            self.pow_nonce +
+            self.packet_type +
+            self.difficulty
+        )
+        return encode_bytes_with_hamming(packet)
+    
     def encode_handshake_request(self) -> bytes:
-        """Encode a Handshake Request packet."""
-        packet = self.public_key + self.packet_type + self.payload
+        """Encode a Handshake Request packet with the requested POW solution."""
+        packet = (
+            self.public_key +
+            self.packet_type +
+            self.payload
+        )
         return encode_bytes_with_hamming(packet)
 
     def encode_handshake_response(self) -> bytes:
         """Encode a Handshake Response packet."""
         packet_size_limit_length = struct.pack('!I', len(str(self.packet_size_limit)))
         encrypted_data_length = struct.pack('!I', len(self.encrypted_data))
+
+        if not self.header_nonce:
+            self.header_nonce = self.connection.generate_unique_nonce()
+
         packet = (
             self.public_key +
             self.packet_type +
-            self.nonce +
+            self.header_nonce +
             packet_size_limit_length +
             str(self.packet_size_limit).encode('utf-8') +
             encrypted_data_length +
@@ -290,45 +327,45 @@ class Packet:
     def decode_hpw_request(packet_bytes: bytes) -> 'Packet':
         """Decode an Initiator PoW Request packet."""
         packet_bytes = decode_bytes_with_hamming(packet_bytes)
-        public_key = packet_bytes[:91]
-        packet_type = packet_bytes[91:92]
-        max_packet_size = struct.unpack('!I', packet_bytes[92:96])[0]
+        public_key = packet_bytes[:ExProtocol.PUBLIC_KEY_SIZE]
+        packet_type = packet_bytes[ExProtocol.PUBLIC_KEY_SIZE:ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH]
+        max_packet_size = struct.unpack('!I', packet_bytes[ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH:ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH + ExProtocol.PACKET_SIZE_LIMIT_LENGTH])[0]
         return Packet(packet_type, b'', public_key, packet_size_limit=max_packet_size)
 
     @staticmethod
     def decode_hpw_response(packet_bytes: bytes) -> 'Packet':
         """Decode a Responder PoW Challenge packet."""
         packet_bytes = decode_bytes_with_hamming(packet_bytes)
-        public_key = packet_bytes[:91]
-        nonce = packet_bytes[91:107]
-        packet_type = packet_bytes[107:108]
-        difficulty = packet_bytes[108]
-        return Packet(packet_type, b'', public_key, nonce, encrypted_data=difficulty.to_bytes(1, 'big'))
+        public_key = packet_bytes[:ExProtocol.PUBLIC_KEY_SIZE]
+        pow_nonce = packet_bytes[ExProtocol.PUBLIC_KEY_SIZE:ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.NONCE_POW_LENGTH]
+        packet_type = packet_bytes[ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.NONCE_POW_LENGTH:ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.NONCE_POW_LENGTH + ExProtocol.PACKET_TYPE_LENGTH]
+        difficulty = packet_bytes[ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.NONCE_POW_LENGTH + ExProtocol.PACKET_TYPE_LENGTH]
+        return Packet(packet_type, b'', public_key, pow_nonce=pow_nonce, difficulty=difficulty.to_bytes(ExProtocol.DIFFICULTY_LENGTH, 'big'))
 
     @staticmethod
     def decode_handshake_request(packet_bytes: bytes) -> 'Packet':
         """Decode a Handshake Request packet."""
         packet_bytes = decode_bytes_with_hamming(packet_bytes)
-        public_key = packet_bytes[:91]
-        packet_type = packet_bytes[91:92]
-        proof_of_work = packet_bytes[92:]
+        public_key = packet_bytes[:ExProtocol.PUBLIC_KEY_SIZE]
+        packet_type = packet_bytes[ExProtocol.PUBLIC_KEY_SIZE:ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH]
+        proof_of_work = packet_bytes[ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH:]
         return Packet(packet_type, proof_of_work, public_key)
 
     @staticmethod
     def decode_handshake_response(packet_bytes: bytes) -> 'Packet':
         """Decode a Handshake Response packet and return a Packet object."""
         packet_bytes = decode_bytes_with_hamming(packet_bytes)
-        public_key = packet_bytes[:91]
-        packet_type = packet_bytes[91:92]
-        nonce = packet_bytes[92:104]
-        packet_size_limit_length = struct.unpack('!I', packet_bytes[104:108])[0]
-        packet_size_limit_end = 108 + packet_size_limit_length
-        packet_size_limit = int(packet_bytes[108:packet_size_limit_end].decode('utf-8'))
-        encrypted_data_length = struct.unpack('!I', packet_bytes[packet_size_limit_end:packet_size_limit_end + 4])[0]
-        encrypted_data_start = packet_size_limit_end + 4
+        public_key = packet_bytes[:ExProtocol.PUBLIC_KEY_SIZE]
+        packet_type = packet_bytes[ExProtocol.PUBLIC_KEY_SIZE:ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH]
+        header_nonce = packet_bytes[ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH:ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH + ExProtocol.NONCE_LENGTH]
+        packet_size_limit_length = struct.unpack('!I', packet_bytes[ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH + ExProtocol.NONCE_LENGTH:ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH + ExProtocol.NONCE_LENGTH + ExProtocol.PACKET_SIZE_LIMIT_LENGTH])[0]
+        packet_size_limit_end = ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH + ExProtocol.NONCE_LENGTH + ExProtocol.PACKET_SIZE_LIMIT_LENGTH + packet_size_limit_length
+        packet_size_limit = int(packet_bytes[ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH + ExProtocol.NONCE_LENGTH + ExProtocol.PACKET_SIZE_LIMIT_LENGTH:packet_size_limit_end].decode('utf-8'))
+        encrypted_data_length = struct.unpack('!I', packet_bytes[packet_size_limit_end:packet_size_limit_end + ExProtocol.PACKET_SIZE_LIMIT_LENGTH])[0]
+        encrypted_data_start = packet_size_limit_end + ExProtocol.PACKET_SIZE_LIMIT_LENGTH
         encrypted_data = packet_bytes[encrypted_data_start:encrypted_data_start + encrypted_data_length]
         
-        return Packet(packet_type, b'', public_key, nonce, packet_size_limit, encrypted_data)
+        return Packet(packet_type, b'', public_key, header_nonce=header_nonce, packet_size_limit=packet_size_limit, encrypted_data=encrypted_data)
 
 
 
@@ -363,6 +400,10 @@ class ExProtocol:
     PAYLOAD_LENGTH_SIZE = 8
 
 
+    NONCE_POW_LENGTH = 16
+    PACKET_TYPE_LENGTH = 1
+    PACKET_SIZE_LIMIT_LENGTH = 4
+    DIFFICULTY_LENGTH = 1
 
     def __init__(self):
         self.connections: Dict[bytes, 'Connection'] = {}
@@ -426,16 +467,16 @@ class ExProtocol:
             print("Invalid PoW request.")
             return None, None
 
-        nonce = os.urandom(16)
+        pow_nonce = os.urandom(self.NONCE_POW_LENGTH)
         difficulty = self.POW_DIFFICULTY
 
         self.nonce_store[packet.public_key] = {
-            'nonce': nonce,
+            'nonce': pow_nonce,
             'difficulty': difficulty,
             'timestamp': time.time()
         }
 
-        pow_challenge_packet = Packet(self.HPW_RESPONSE_FLAG, b'', packet.public_key, nonce, encrypted_data=difficulty.to_bytes(1, 'big'))
+        pow_challenge_packet = Packet(self.HPW_RESPONSE_FLAG, b'', packet.public_key, pow_nonce=pow_nonce, difficulty=difficulty.to_bytes(1, 'big'))
         return pow_challenge_packet.encode_hpw_response(), packet.public_key
 
     def verify_pow(self, nonce, proof, difficulty) -> bool:
@@ -444,12 +485,12 @@ class ExProtocol:
 
     def complete_pow_request(self, pow_challenge, private_key) -> bytes:
         packet = Packet.decode_hpw_response(pow_challenge)
-
+        difficulty = int.from_bytes(packet.difficulty, 'big')
         if packet.packet_type != self.HPW_RESPONSE_FLAG:
             print("Invalid PoW challenge structure.")
             return None
 
-        if int.from_bytes(packet.encrypted_data, 'big') > self.DIFFICULTY_LIMIT:
+        if difficulty > self.DIFFICULTY_LIMIT:
             raise Exception("Difficulty too high.")
 
         proof = 0
@@ -460,7 +501,7 @@ class ExProtocol:
                 return None
 
             proof_bytes = proof.to_bytes((proof.bit_length() + 7) // 8, byteorder='big')
-            if len(proof_bytes) <= self.MAX_PROOF_LENGTH and self.verify_pow(packet.nonce, proof_bytes, int.from_bytes(packet.encrypted_data, 'big')):
+            if len(proof_bytes) <= self.MAX_PROOF_LENGTH and self.verify_pow(packet.pow_nonce, proof_bytes, difficulty):
                 break
             proof += 1
 
@@ -493,10 +534,10 @@ class ExProtocol:
             del self.nonce_store[packet.public_key]
             return None, None, None
 
-        nonce = nonce_data['nonce']
+        pow_nonce = nonce_data['nonce']
         difficulty = nonce_data['difficulty']
 
-        if not self.verify_pow(nonce, packet.payload, difficulty):
+        if not self.verify_pow(pow_nonce, packet.payload, difficulty):
             print("Invalid PoW solution.")
             return None, None, None
 
@@ -527,19 +568,18 @@ class ExProtocol:
 
         # Create a Packet object for the handshake response
         handshake_response_packet = Packet(
-            self.HANDSHAKE_RESPONSE_FLAG,
-            b'',
-            public_key_b.public_bytes(
+            packet_type=self.HANDSHAKE_RESPONSE_FLAG,
+            encrypted_data=encrypted_handshake_data,
+            public_key=public_key_b.public_bytes(
                 encoding=serialization.Encoding.DER,
                 format=serialization.PublicFormat.SubjectPublicKeyInfo
             ),
-            nonce,
-            max_packet_size,
-            encrypted_handshake_data
+            packet_size_limit=max_packet_size,
+            header_nonce=nonce
         )
 
         # Initialize the connection for Node B
-        self.initialize_connection(connection_id, connection_key, valid_until, private_key, self.MAX_PACKET_SIZE, max_packet_size, self)
+        self.initialize_connection(connection_id, connection_key, valid_until, private_key, self.MAX_PACKET_SIZE, max_packet_size, self, nonce)
 
         return handshake_response_packet.encode_handshake_response(), private_key, connection_id
 
@@ -557,7 +597,7 @@ class ExProtocol:
 
         aesgcm = AESGCM(connection_key)
         try:
-            handshake_data = aesgcm.decrypt(packet.nonce, packet.encrypted_data, None)
+            handshake_data = aesgcm.decrypt(packet.header_nonce, packet.encrypted_data, None)
             handshake_info = json.loads(handshake_data.decode('utf-8'))
         except Exception as e:
             print(f"Failed to decrypt handshake data: {e}")
@@ -568,16 +608,16 @@ class ExProtocol:
         max_packet_size = handshake_info['max_packet_size']
 
         # Initialize the connection
-        self.initialize_connection(connection_id, connection_key, valid_until, private_key, self.MAX_PACKET_SIZE, max_packet_size, self)
+        self.initialize_connection(connection_id, connection_key, valid_until, private_key, self.MAX_PACKET_SIZE, max_packet_size, self, packet.header_nonce)
 
         return connection_id
 
-    def initialize_connection(self, connection_id: bytes, connection_key: bytes, valid_until: int, private_key: ec.EllipticCurvePrivateKey, max_packet_size_a: int, max_packet_size_b: int, protocol: 'ExProtocol') -> None:
-        self.connections[connection_id] = Connection(connection_id, connection_key, min(max_packet_size_a, max_packet_size_b), private_key, valid_until, protocol)
+    def initialize_connection(self, connection_id: bytes, connection_key: bytes, valid_until: int, private_key: ec.EllipticCurvePrivateKey, max_packet_size_a: int, max_packet_size_b: int, protocol: 'ExProtocol', used_nonce = bytes) -> None:
+        self.connections[connection_id] = Connection(connection_id, connection_key, min(max_packet_size_a, max_packet_size_b), private_key, valid_until, protocol, used_nonce)
 
 
 class Connection:
-    def __init__(self, connection_id: bytes, connection_key: bytes, max_packet_size: int, private_key: ec.EllipticCurvePrivateKey, valid_until: int, protocol: ExProtocol):
+    def __init__(self, connection_id: bytes, connection_key: bytes, max_packet_size: int, private_key: ec.EllipticCurvePrivateKey, valid_until: int, protocol: ExProtocol, used_nonce = bytes):
         self.protocol = protocol
         self.connection_id = connection_id
         self.connection_key = connection_key
@@ -585,7 +625,7 @@ class Connection:
         self.private_key = private_key
         self.valid_until = valid_until
         self.processed_uuids: Dict[str, float] = {}
-        self.used_nonces: set = set()
+        self.used_nonces: set = set([used_nonce])
 
     def cleanup_uuids(self) -> None:
         current_time = time.time()
@@ -667,6 +707,9 @@ def main() -> None:
     protocol_a = ExProtocol()
     protocol_b = ExProtocol()
 
+    #time the handshake
+    start_time = time.time()
+
     # Node A initiates a handshake request to Node B
     pow_request, node_a_private_key = protocol_a.initiate_handshake_request()
 
@@ -682,7 +725,7 @@ def main() -> None:
     # Node A completes the handshake by processing the response
     connection_id_a = protocol_a.complete_handshake(response, node_a_private_key)
 
-    print("Handshake completed successfully.")
+    print("Handshake completed successfully in {} seconds.".format(time.time() - start_time))
     print("Connection ID A:", connection_id_a)
     print("Connection ID B:", connection_id_b)
 
