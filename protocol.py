@@ -11,10 +11,11 @@ from cryptography.exceptions import InvalidSignature
 import hashlib
 import traceback
 from c_hamming import encode_bytes_with_hamming, decode_bytes_with_hamming
+from typing import Optional, Tuple, Dict, Any
 
 
 class Packet:
-    def __init__(self, packet_type, payload: bytes = None, public_key: bytes = None, nonce: bytes = None, packet_size_limit: int = None, encrypted_data: bytes = None, header_dict: dict = None, packet_uuid: str = None, packet_family: str = None, timestamp: int = None, encoding: str = 'utf-8', data_type: str = 'text', status_code: int = 200, connection: 'Connection' = None):
+    def __init__(self, packet_type: int, payload: Optional[bytes] = None, public_key: Optional[bytes] = None, nonce: Optional[bytes] = None, packet_size_limit: Optional[int] = None, encrypted_data: Optional[bytes] = None, header_dict: Optional[Dict[str, Any]] = None, packet_uuid: Optional[str] = None, packet_family: Optional[str] = None, timestamp: Optional[int] = None, encoding: str = 'utf-8', data_type: str = 'text', status_code: int = 200, connection: Optional['Connection'] = None):
         self.packet_type = packet_type
         self.payload = payload  # Plaintext payload
         self.public_key = public_key
@@ -36,9 +37,7 @@ class Packet:
         self.data_type = data_type
         self.status_code = status_code
 
-
-
-    def prepare_for_encryption(self):
+    def prepare_for_encryption(self) -> None:
         """Prepare the packet for encryption by ensuring all necessary attributes are set."""
         if not self.header_dict or self.packet_type is None:
             raise ValueError("Header dictionary and packet type must be set.")
@@ -52,18 +51,16 @@ class Packet:
             self.generate_packet()
             self.last_generated_time = current_time
 
-    def generate_packet(self, connection: 'Connection' = None) -> bytes:
+    def generate_packet(self, connection: Optional['Connection'] = None) -> bytes:
         """Encrypt the packet using the attributes like header_dict and packet_type."""
-
         if not self.connection and not connection:
             raise ValueError("Connection must be provided.")
         
         if connection:
             self.connection = connection
-
+        
         if not self.nonce:
             self.nonce = self.connection.generate_unique_nonce()
-        
         
         # Use the connection's key
         key_to_use = self.connection.connection_key
@@ -132,12 +129,8 @@ class Packet:
         
         return packet
 
-
-
-
-
     @staticmethod
-    def decrypt(encrypted_packet: bytes, connection: 'Connection') -> 'Packet':
+    def decrypt(encrypted_packet: bytes, connection: 'Connection') -> Optional['Packet']:
         try:
             connection_key = connection.connection_key
             connection_id = connection.connection_id
@@ -372,11 +365,11 @@ class ExProtocol:
 
 
     def __init__(self):
-        self.connections = {}
-        self.nonce_store = {}
+        self.connections: Dict[bytes, 'Connection'] = {}
+        self.nonce_store: Dict[bytes, float] = {}
 
 
-    def generate_key_pair(self):
+    def generate_key_pair(self) -> Tuple[Optional[ec.EllipticCurvePrivateKey], Optional[ec.EllipticCurvePublicKey]]:
         try:
             private_key = ec.generate_private_key(ec.SECP256R1())
             public_key = private_key.public_key()
@@ -385,7 +378,7 @@ class ExProtocol:
             print(f"Key pair generation failed: {e}")
             return None, None
 
-    def exchange_keys(self, private_key, peer_public_key_bytes):
+    def exchange_keys(self, private_key: ec.EllipticCurvePrivateKey, peer_public_key_bytes: bytes) -> Optional[bytes]:
         try:
             peer_public_key = serialization.load_der_public_key(peer_public_key_bytes)
             shared_secret = private_key.exchange(ec.ECDH(), peer_public_key)
@@ -394,7 +387,7 @@ class ExProtocol:
             print(f"Key exchange failed: {e}")
             return None
 
-    def derive_connection_key(self, shared_secret):
+    def derive_connection_key(self, shared_secret: bytes) -> Optional[bytes]:
         if shared_secret is None:
             print("Shared secret is None, cannot derive connection key.")
             return None
@@ -410,7 +403,7 @@ class ExProtocol:
             print(f"Connection key derivation failed: {e}")
             return None
 
-    def initiate_handshake_request(self) -> tuple[bytes, bytes]:
+    def initiate_handshake_request(self) -> Tuple[bytes, ec.EllipticCurvePrivateKey]:
         private_key, public_key = self.generate_key_pair()
         if not private_key or not public_key:
             print("Failed to generate key pair for handshake.")
@@ -551,7 +544,7 @@ class ExProtocol:
         return handshake_response_packet.encode_handshake_response(), private_key, connection_id
 
 
-    def complete_handshake(self, handshake_response, private_key):
+    def complete_handshake(self, handshake_response: bytes, private_key: ec.EllipticCurvePrivateKey) -> Optional[bytes]:
         packet = Packet.decode_handshake_response(handshake_response)
 
         if packet.packet_type != self.HANDSHAKE_RESPONSE_FLAG:
@@ -579,26 +572,26 @@ class ExProtocol:
 
         return connection_id
 
-    def initialize_connection(self, connection_id, connection_key, valid_until, private_key, max_packet_size_a, max_packet_size_b, protocol):
+    def initialize_connection(self, connection_id: bytes, connection_key: bytes, valid_until: int, private_key: ec.EllipticCurvePrivateKey, max_packet_size_a: int, max_packet_size_b: int, protocol: 'ExProtocol') -> None:
         self.connections[connection_id] = Connection(connection_id, connection_key, min(max_packet_size_a, max_packet_size_b), private_key, valid_until, protocol)
 
 
 class Connection:
-    def __init__(self, connection_id, connection_key, max_packet_size, private_key, valid_until, protocol):
+    def __init__(self, connection_id: bytes, connection_key: bytes, max_packet_size: int, private_key: ec.EllipticCurvePrivateKey, valid_until: int, protocol: ExProtocol):
         self.protocol = protocol
         self.connection_id = connection_id
         self.connection_key = connection_key
         self.max_packet_size = max_packet_size
         self.private_key = private_key
         self.valid_until = valid_until
-        self.processed_uuids = {}
-        self.used_nonces = set()
+        self.processed_uuids: Dict[str, float] = {}
+        self.used_nonces: set = set()
 
-    def cleanup_uuids(self):
+    def cleanup_uuids(self) -> None:
         current_time = time.time()
         self.processed_uuids = {uuid: ts for uuid, ts in self.processed_uuids.items() if current_time - ts < 60}
 
-    def generate_unique_nonce(self):
+    def generate_unique_nonce(self) -> bytes:
         """Generate a unique nonce for this connection."""
         while True:
             nonce = os.urandom(ExProtocol.NONCE_LENGTH)
@@ -606,7 +599,7 @@ class Connection:
                 self.used_nonces.add(nonce)
                 return nonce
 
-    def create_data_packet(self, data=None, header=None, connection_id=None):
+    def create_data_packet(self, data: Optional[bytes] = None, header: Optional[Dict[str, Any]] = None, connection_id: Optional[bytes] = None) -> Tuple[bytes, str]:
         if connection_id is None:
             connection_id = self.connection_id
 
@@ -634,7 +627,7 @@ class Connection:
         encoded_packet = encode_bytes_with_hamming(encrypted_packet)
         return encoded_packet, packet_uuid
 
-    def create_response_packet(self, data=None, original_packet_uuid=None, header=None, connection_id=None):
+    def create_response_packet(self, data: Optional[bytes] = None, original_packet_uuid: Optional[str] = None, header: Optional[Dict[str, Any]] = None, connection_id: Optional[bytes] = None) -> bytes:
         if connection_id is None:
             connection_id = self.connection_id
 
@@ -645,7 +638,6 @@ class Connection:
             "data_type": "application/json",
             "status_code": 200,
             "packet_uuid": original_packet_uuid  # Include original packet UUID
-            
         }
         if header:
             default_header.update(header)
@@ -654,7 +646,6 @@ class Connection:
             packet_type=ExProtocol.RESPONSE_FLAG,
             payload=data,
             header_dict=default_header,
-            packet_uuid=original_packet_uuid,
             public_key=connection_id,  # Use connection_id as the public key
             status_code=default_header['status_code']
         )
@@ -672,7 +663,7 @@ class Connection:
 
 
 # Example usage
-def main():
+def main() -> None:
     protocol_a = ExProtocol()
     protocol_b = ExProtocol()
 
@@ -697,7 +688,6 @@ def main():
 
     # Create a data packet
     data_packet, packet_uuid = protocol_a.connections[connection_id_a].create_data_packet(b'Hello, Node B!')
-   #  print("Data packet:", data_packet)
     print("Packet UUID:", packet_uuid)
 
     # Decrypt the data packet
@@ -709,7 +699,6 @@ def main():
 
     # Create a response packet
     response_packet = protocol_b.connections[connection_id_b].create_response_packet(b'Hello, Node A!', original_packet_uuid=decrypted_packet.packet_uuid)
-  #  print("Response packet:", response_packet)
     print("Response packet UUID:", packet_uuid)
 
     # Decrypt the response packet
