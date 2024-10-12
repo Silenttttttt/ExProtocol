@@ -55,6 +55,263 @@ class Packet:
         if self.packet_payload is None or (self.last_generated_time and (current_time - self.last_generated_time > self.packet_validity)):
             self.last_generated_time = current_time
 
+    @staticmethod
+    def initiate_handshake_request(protocol: 'ExProtocol') -> Tuple[bytes, ec.EllipticCurvePrivateKey]:
+        private_key, public_key = protocol.generate_key_pair()
+        if not private_key or not public_key:
+            print("Failed to generate key pair for handshake.")
+            return None, None
+
+        public_key_bytes = public_key.public_bytes(
+            encoding=serialization.Encoding.DER,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+
+        packet = Packet(protocol.HPW_FLAG, b'', public_key_bytes, packet_size_limit=protocol.MAX_PACKET_SIZE)
+        encoded_packet = packet.encode_hpw_request()
+        return encoded_packet, private_key
+
+    @staticmethod
+    def create_pow_challenge(protocol: 'ExProtocol', pow_request) -> Tuple[bytes, bytes]:
+        packet = Packet.decode_hpw_request(pow_request)
+
+        if packet.packet_type != protocol.HPW_FLAG:
+            print("Invalid PoW request.")
+            return None, None
+
+        pow_nonce = os.urandom(protocol.NONCE_POW_LENGTH)
+        difficulty = protocol.POW_DIFFICULTY
+
+        nonce_data = {
+            'nonce': pow_nonce,
+            'difficulty': difficulty,
+            'timestamp': time.time()
+        }
+        protocol.add_nonce(packet.public_key, nonce_data)
+
+        pow_challenge_packet = Packet(protocol.HPW_RESPONSE_FLAG, b'', packet.public_key, pow_nonce=pow_nonce, difficulty=difficulty.to_bytes(1, 'big'))
+        return pow_challenge_packet.encode_hpw_response(), packet.public_key
+
+    @staticmethod
+    def complete_pow_request(protocol: 'ExProtocol', pow_challenge, private_key) -> bytes:
+        packet = Packet.decode_hpw_response(pow_challenge)
+        difficulty = int.from_bytes(packet.difficulty, 'big')
+        if packet.packet_type != protocol.HPW_RESPONSE_FLAG:
+            print("Invalid PoW challenge structure.")
+            return None
+
+        if difficulty > protocol.DIFFICULTY_LIMIT:
+            raise Exception("Difficulty too high.")
+
+        proof = 0
+        start_time = time.time()
+        while True:
+            if time.time() - start_time > protocol.POW_TIMEOUT:
+                print("Proof of work timed out.")
+                return None
+
+            proof_bytes = proof.to_bytes((proof.bit_length() + 7) // 8, byteorder='big')
+            if len(proof_bytes) <= protocol.MAX_PROOF_LENGTH and protocol.verify_pow(packet.pow_nonce, proof_bytes, difficulty):
+                break
+            proof += 1
+
+        public_key_bytes = private_key.public_key().public_bytes(
+            encoding=serialization.Encoding.DER,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+        handshake_request_packet = Packet(protocol.HANDSHAKE_FLAG, proof_bytes, public_key_bytes)
+        return handshake_request_packet.encode_handshake_request()
+
+    @staticmethod
+    def perform_handshake_response(protocol: 'ExProtocol', handshake_request):
+        packet = Packet.decode_handshake_request(handshake_request)
+
+        if packet.packet_type != protocol.HANDSHAKE_FLAG:
+            print("Invalid handshake request.")
+            return None, None, None
+
+        if len(packet.payload) > protocol.MAX_PROOF_LENGTH:
+            print("Proof of work solution is too long, possible attack.")
+            return None, None, None
+
+        nonce_data = protocol.get_nonce(packet.public_key)
+        if not nonce_data:
+            print("Nonce not found or expired.")
+            return None, None, None
+
+        if time.time() - nonce_data['timestamp'] > protocol.NONCE_VALIDITY_PERIOD:
+            print("Nonce expired.")
+            protocol.remove_nonce(packet.public_key)
+            return None, None, None
+
+        pow_nonce = nonce_data['nonce']
+        difficulty = nonce_data['difficulty']
+
+        if not protocol.verify_pow(pow_nonce, packet.payload, difficulty):
+            print("Invalid PoW solution.")
+            return None, None, None
+
+        private_key, public_key_b = protocol.generate_key_pair()
+        shared_secret = protocol.exchange_keys(private_key, packet.public_key)
+        if not shared_secret:
+            print("Failed to exchange keys during handshake.")
+            return None, None, None
+
+        connection_key = protocol.derive_connection_key(shared_secret)
+        if not connection_key:
+            print("Failed to derive connection key during handshake.")
+            return None, None, None
+
+        connection_id = os.urandom(16)
+        valid_until = time.time() + protocol.DEFAULT_VALIDITY_PERIOD
+        max_packet_size = protocol.MAX_PACKET_SIZE
+
+        aesgcm = AESGCM(connection_key)
+        nonce = os.urandom(ExProtocol.NONCE_LENGTH)
+        handshake_data = json.dumps({
+            'connection_id': connection_id.hex(),
+            'valid_until': valid_until,
+            'max_packet_size': max_packet_size
+        }).encode('utf-8')
+        encrypted_handshake_data = aesgcm.encrypt(nonce, handshake_data, None)
+
+        handshake_response_packet = Packet(
+            packet_type=protocol.HANDSHAKE_RESPONSE_FLAG,
+            encrypted_data=encrypted_handshake_data,
+            public_key=public_key_b.public_bytes(
+                encoding=serialization.Encoding.DER,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo
+            ),
+            packet_size_limit=max_packet_size,
+            header_nonce=nonce
+        )
+
+        protocol.initialize_connection(connection_id, connection_key, valid_until, private_key, protocol.MAX_PACKET_SIZE, max_packet_size, protocol, nonce)
+
+        return handshake_response_packet.encode_handshake_response(), private_key, connection_id
+
+    @staticmethod
+    def complete_handshake(protocol: 'ExProtocol', handshake_response: bytes, private_key: ec.EllipticCurvePrivateKey) -> Optional[bytes]:
+        packet = Packet.decode_handshake_response(handshake_response)
+
+        if packet.packet_type != protocol.HANDSHAKE_RESPONSE_FLAG:
+            print("Invalid handshake response flag.")
+            return None
+
+        shared_secret = protocol.exchange_keys(private_key, packet.public_key)
+        connection_key = protocol.derive_connection_key(shared_secret)
+
+        aesgcm = AESGCM(connection_key)
+        try:
+            handshake_data = aesgcm.decrypt(packet.header_nonce, packet.encrypted_data, None)
+            handshake_info = json.loads(handshake_data.decode('utf-8'))
+        except Exception as e:
+            print(f"Failed to decrypt handshake data: {e}")
+            return None
+
+        connection_id = bytes.fromhex(handshake_info['connection_id'])
+        valid_until = handshake_info['valid_until']
+        max_packet_size = handshake_info['max_packet_size']
+
+        protocol.initialize_connection(connection_id, connection_key, valid_until, private_key, protocol.MAX_PACKET_SIZE, max_packet_size, protocol, packet.header_nonce)
+
+        return connection_id
+
+    def encode_hpw_request(self) -> bytes:
+        """Encode an Initiator PoW Request packet."""
+        packet = (
+            self.public_key +
+            self.packet_type +
+            struct.pack('!I', self.packet_size_limit)
+        )
+        return encode_bytes_with_hamming(packet)
+
+    def encode_hpw_response(self) -> bytes:
+        """Encode a Responder PoW Challenge packet."""
+
+        #self.pow_nonce = os.urandom(ExProtocol.NONCE_POW_LENGTH)
+
+        packet = (
+            self.public_key +
+            self.pow_nonce +
+            self.packet_type +
+            self.difficulty
+        )
+        return encode_bytes_with_hamming(packet)
+    
+    def encode_handshake_request(self) -> bytes:
+        """Encode a Handshake Request packet with the requested POW solution."""
+        packet = (
+            self.public_key +
+            self.packet_type +
+            self.payload
+        )
+        return encode_bytes_with_hamming(packet)
+
+    def encode_handshake_response(self) -> bytes:
+        """Encode a Handshake Response packet."""
+        packet_size_limit_length = struct.pack('!I', len(str(self.packet_size_limit)))
+        encrypted_data_length = struct.pack('!I', len(self.encrypted_data))
+
+        if not self.header_nonce:
+            self.header_nonce = self.connection.generate_unique_nonce()
+
+        packet = (
+            self.public_key +
+            self.packet_type +
+            self.header_nonce +
+            packet_size_limit_length +
+            str(self.packet_size_limit).encode('utf-8') +
+            encrypted_data_length +
+            self.encrypted_data
+        )
+        return encode_bytes_with_hamming(packet)
+
+    @staticmethod
+    def decode_hpw_request(packet_bytes: bytes) -> 'Packet':
+        """Decode an Initiator PoW Request packet."""
+        packet_bytes = decode_bytes_with_hamming(packet_bytes)
+        public_key = packet_bytes[:ExProtocol.PUBLIC_KEY_SIZE]
+        packet_type = packet_bytes[ExProtocol.PUBLIC_KEY_SIZE:ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH]
+        max_packet_size = struct.unpack('!I', packet_bytes[ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH:ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH + ExProtocol.PACKET_SIZE_LIMIT_LENGTH])[0]
+        return Packet(packet_type, b'', public_key, packet_size_limit=max_packet_size)
+
+    @staticmethod
+    def decode_hpw_response(packet_bytes: bytes) -> 'Packet':
+        """Decode a Responder PoW Challenge packet."""
+        packet_bytes = decode_bytes_with_hamming(packet_bytes)
+        public_key = packet_bytes[:ExProtocol.PUBLIC_KEY_SIZE]
+        pow_nonce = packet_bytes[ExProtocol.PUBLIC_KEY_SIZE:ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.NONCE_POW_LENGTH]
+        packet_type = packet_bytes[ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.NONCE_POW_LENGTH:ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.NONCE_POW_LENGTH + ExProtocol.PACKET_TYPE_LENGTH]
+        difficulty = packet_bytes[ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.NONCE_POW_LENGTH + ExProtocol.PACKET_TYPE_LENGTH]
+        return Packet(packet_type, b'', public_key, pow_nonce=pow_nonce, difficulty=difficulty.to_bytes(ExProtocol.DIFFICULTY_LENGTH, 'big'))
+
+    @staticmethod
+    def decode_handshake_request(packet_bytes: bytes) -> 'Packet':
+        """Decode a Handshake Request packet."""
+        packet_bytes = decode_bytes_with_hamming(packet_bytes)
+        public_key = packet_bytes[:ExProtocol.PUBLIC_KEY_SIZE]
+        packet_type = packet_bytes[ExProtocol.PUBLIC_KEY_SIZE:ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH]
+        proof_of_work = packet_bytes[ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH:]
+        return Packet(packet_type, proof_of_work, public_key)
+
+    @staticmethod
+    def decode_handshake_response(packet_bytes: bytes) -> 'Packet':
+        """Decode a Handshake Response packet and return a Packet object."""
+        packet_bytes = decode_bytes_with_hamming(packet_bytes)
+        public_key = packet_bytes[:ExProtocol.PUBLIC_KEY_SIZE]
+        packet_type = packet_bytes[ExProtocol.PUBLIC_KEY_SIZE:ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH]
+        header_nonce = packet_bytes[ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH:ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH + ExProtocol.NONCE_LENGTH]
+        packet_size_limit_length = struct.unpack('!I', packet_bytes[ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH + ExProtocol.NONCE_LENGTH:ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH + ExProtocol.NONCE_LENGTH + ExProtocol.PACKET_SIZE_LIMIT_LENGTH])[0]
+        packet_size_limit_end = ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH + ExProtocol.NONCE_LENGTH + ExProtocol.PACKET_SIZE_LIMIT_LENGTH + packet_size_limit_length
+        packet_size_limit = int(packet_bytes[ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH + ExProtocol.NONCE_LENGTH + ExProtocol.PACKET_SIZE_LIMIT_LENGTH:packet_size_limit_end].decode('utf-8'))
+        encrypted_data_length = struct.unpack('!I', packet_bytes[packet_size_limit_end:packet_size_limit_end + ExProtocol.PACKET_SIZE_LIMIT_LENGTH])[0]
+        encrypted_data_start = packet_size_limit_end + ExProtocol.PACKET_SIZE_LIMIT_LENGTH
+        encrypted_data = packet_bytes[encrypted_data_start:encrypted_data_start + encrypted_data_length]
+        
+        return Packet(packet_type, b'', public_key, header_nonce=header_nonce, packet_size_limit=packet_size_limit, encrypted_data=encrypted_data)
+
+
 
     def generate_packet(self, connection: Optional['Connection'] = None) -> bytes:
         """Encrypt the packet using the attributes like header_dict and packet_type."""
@@ -271,262 +528,6 @@ class Packet:
             print(f"Decryption failed: {e}")
             return None
 
-    @staticmethod
-    def initiate_handshake_request(protocol: 'ExProtocol') -> Tuple[bytes, ec.EllipticCurvePrivateKey]:
-        private_key, public_key = protocol.generate_key_pair()
-        if not private_key or not public_key:
-            print("Failed to generate key pair for handshake.")
-            return None, None
-
-        public_key_bytes = public_key.public_bytes(
-            encoding=serialization.Encoding.DER,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo
-        )
-
-        packet = Packet(protocol.HPW_FLAG, b'', public_key_bytes, packet_size_limit=protocol.MAX_PACKET_SIZE)
-        encoded_packet = packet.encode_hpw_request()
-        return encoded_packet, private_key
-
-    @staticmethod
-    def create_pow_challenge(protocol: 'ExProtocol', pow_request) -> Tuple[bytes, bytes]:
-        packet = Packet.decode_hpw_request(pow_request)
-
-        if packet.packet_type != protocol.HPW_FLAG:
-            print("Invalid PoW request.")
-            return None, None
-
-        pow_nonce = os.urandom(protocol.NONCE_POW_LENGTH)
-        difficulty = protocol.POW_DIFFICULTY
-
-        protocol.nonce_store[packet.public_key] = {
-            'nonce': pow_nonce,
-            'difficulty': difficulty,
-            'timestamp': time.time()
-        }
-
-        pow_challenge_packet = Packet(protocol.HPW_RESPONSE_FLAG, b'', packet.public_key, pow_nonce=pow_nonce, difficulty=difficulty.to_bytes(1, 'big'))
-        return pow_challenge_packet.encode_hpw_response(), packet.public_key
-
-    @staticmethod
-    def complete_pow_request(protocol: 'ExProtocol', pow_challenge, private_key) -> bytes:
-        packet = Packet.decode_hpw_response(pow_challenge)
-        difficulty = int.from_bytes(packet.difficulty, 'big')
-        if packet.packet_type != protocol.HPW_RESPONSE_FLAG:
-            print("Invalid PoW challenge structure.")
-            return None
-
-        if difficulty > protocol.DIFFICULTY_LIMIT:
-            raise Exception("Difficulty too high.")
-
-        proof = 0
-        start_time = time.time()
-        while True:
-            if time.time() - start_time > protocol.POW_TIMEOUT:
-                print("Proof of work timed out.")
-                return None
-
-            proof_bytes = proof.to_bytes((proof.bit_length() + 7) // 8, byteorder='big')
-            if len(proof_bytes) <= protocol.MAX_PROOF_LENGTH and protocol.verify_pow(packet.pow_nonce, proof_bytes, difficulty):
-                break
-            proof += 1
-
-        public_key_bytes = private_key.public_key().public_bytes(
-            encoding=serialization.Encoding.DER,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo
-        )
-        handshake_request_packet = Packet(protocol.HANDSHAKE_FLAG, proof_bytes, public_key_bytes)
-        return handshake_request_packet.encode_handshake_request()
-
-    @staticmethod
-    def perform_handshake_response(protocol: 'ExProtocol', handshake_request):
-        packet = Packet.decode_handshake_request(handshake_request)
-
-        if packet.packet_type != protocol.HANDSHAKE_FLAG:
-            print("Invalid handshake request.")
-            return None, None, None
-
-        if len(packet.payload) > protocol.MAX_PROOF_LENGTH:
-            print("Proof of work solution is too long, possible attack.")
-            return None, None, None
-
-        nonce_data = protocol.nonce_store.get(packet.public_key)
-        if not nonce_data:
-            print("Nonce not found or expired.")
-            return None, None, None
-
-        if time.time() - nonce_data['timestamp'] > protocol.NONCE_VALIDITY_PERIOD:
-            print("Nonce expired.")
-            del protocol.nonce_store[packet.public_key]
-            return None, None, None
-
-        pow_nonce = nonce_data['nonce']
-        difficulty = nonce_data['difficulty']
-
-        if not protocol.verify_pow(pow_nonce, packet.payload, difficulty):
-            print("Invalid PoW solution.")
-            return None, None, None
-
-        private_key, public_key_b = protocol.generate_key_pair()
-        shared_secret = protocol.exchange_keys(private_key, packet.public_key)
-        if not shared_secret:
-            print("Failed to exchange keys during handshake.")
-            return None, None, None
-
-        connection_key = protocol.derive_connection_key(shared_secret)
-        if not connection_key:
-            print("Failed to derive connection key during handshake.")
-            return None, None, None
-
-        connection_id = os.urandom(16)
-        valid_until = time.time() + protocol.DEFAULT_VALIDITY_PERIOD
-        max_packet_size = protocol.MAX_PACKET_SIZE
-
-        aesgcm = AESGCM(connection_key)
-        nonce = os.urandom(ExProtocol.NONCE_LENGTH)
-        handshake_data = json.dumps({
-            'connection_id': connection_id.hex(),
-            'valid_until': valid_until,
-            'max_packet_size': max_packet_size
-        }).encode('utf-8')
-        encrypted_handshake_data = aesgcm.encrypt(nonce, handshake_data, None)
-
-        handshake_response_packet = Packet(
-            packet_type=protocol.HANDSHAKE_RESPONSE_FLAG,
-            encrypted_data=encrypted_handshake_data,
-            public_key=public_key_b.public_bytes(
-                encoding=serialization.Encoding.DER,
-                format=serialization.PublicFormat.SubjectPublicKeyInfo
-            ),
-            packet_size_limit=max_packet_size,
-            header_nonce=nonce
-        )
-
-        protocol.initialize_connection(connection_id, connection_key, valid_until, private_key, protocol.MAX_PACKET_SIZE, max_packet_size, protocol, nonce)
-
-        return handshake_response_packet.encode_handshake_response(), private_key, connection_id
-
-    @staticmethod
-    def complete_handshake(protocol: 'ExProtocol', handshake_response: bytes, private_key: ec.EllipticCurvePrivateKey) -> Optional[bytes]:
-        packet = Packet.decode_handshake_response(handshake_response)
-
-        if packet.packet_type != protocol.HANDSHAKE_RESPONSE_FLAG:
-            print("Invalid handshake response flag.")
-            return None
-
-        shared_secret = protocol.exchange_keys(private_key, packet.public_key)
-        connection_key = protocol.derive_connection_key(shared_secret)
-
-        aesgcm = AESGCM(connection_key)
-        try:
-            handshake_data = aesgcm.decrypt(packet.header_nonce, packet.encrypted_data, None)
-            handshake_info = json.loads(handshake_data.decode('utf-8'))
-        except Exception as e:
-            print(f"Failed to decrypt handshake data: {e}")
-            return None
-
-        connection_id = bytes.fromhex(handshake_info['connection_id'])
-        valid_until = handshake_info['valid_until']
-        max_packet_size = handshake_info['max_packet_size']
-
-        protocol.initialize_connection(connection_id, connection_key, valid_until, private_key, protocol.MAX_PACKET_SIZE, max_packet_size, protocol, packet.header_nonce)
-
-        return connection_id
-
-    def encode_hpw_request(self) -> bytes:
-        """Encode an Initiator PoW Request packet."""
-        packet = (
-            self.public_key +
-            self.packet_type +
-            struct.pack('!I', self.packet_size_limit)
-        )
-        return encode_bytes_with_hamming(packet)
-
-    def encode_hpw_response(self) -> bytes:
-        """Encode a Responder PoW Challenge packet."""
-
-        #self.pow_nonce = os.urandom(ExProtocol.NONCE_POW_LENGTH)
-
-        packet = (
-            self.public_key +
-            self.pow_nonce +
-            self.packet_type +
-            self.difficulty
-        )
-        return encode_bytes_with_hamming(packet)
-    
-    def encode_handshake_request(self) -> bytes:
-        """Encode a Handshake Request packet with the requested POW solution."""
-        packet = (
-            self.public_key +
-            self.packet_type +
-            self.payload
-        )
-        return encode_bytes_with_hamming(packet)
-
-    def encode_handshake_response(self) -> bytes:
-        """Encode a Handshake Response packet."""
-        packet_size_limit_length = struct.pack('!I', len(str(self.packet_size_limit)))
-        encrypted_data_length = struct.pack('!I', len(self.encrypted_data))
-
-        if not self.header_nonce:
-            self.header_nonce = self.connection.generate_unique_nonce()
-
-        packet = (
-            self.public_key +
-            self.packet_type +
-            self.header_nonce +
-            packet_size_limit_length +
-            str(self.packet_size_limit).encode('utf-8') +
-            encrypted_data_length +
-            self.encrypted_data
-        )
-        return encode_bytes_with_hamming(packet)
-
-    @staticmethod
-    def decode_hpw_request(packet_bytes: bytes) -> 'Packet':
-        """Decode an Initiator PoW Request packet."""
-        packet_bytes = decode_bytes_with_hamming(packet_bytes)
-        public_key = packet_bytes[:ExProtocol.PUBLIC_KEY_SIZE]
-        packet_type = packet_bytes[ExProtocol.PUBLIC_KEY_SIZE:ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH]
-        max_packet_size = struct.unpack('!I', packet_bytes[ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH:ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH + ExProtocol.PACKET_SIZE_LIMIT_LENGTH])[0]
-        return Packet(packet_type, b'', public_key, packet_size_limit=max_packet_size)
-
-    @staticmethod
-    def decode_hpw_response(packet_bytes: bytes) -> 'Packet':
-        """Decode a Responder PoW Challenge packet."""
-        packet_bytes = decode_bytes_with_hamming(packet_bytes)
-        public_key = packet_bytes[:ExProtocol.PUBLIC_KEY_SIZE]
-        pow_nonce = packet_bytes[ExProtocol.PUBLIC_KEY_SIZE:ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.NONCE_POW_LENGTH]
-        packet_type = packet_bytes[ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.NONCE_POW_LENGTH:ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.NONCE_POW_LENGTH + ExProtocol.PACKET_TYPE_LENGTH]
-        difficulty = packet_bytes[ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.NONCE_POW_LENGTH + ExProtocol.PACKET_TYPE_LENGTH]
-        return Packet(packet_type, b'', public_key, pow_nonce=pow_nonce, difficulty=difficulty.to_bytes(ExProtocol.DIFFICULTY_LENGTH, 'big'))
-
-    @staticmethod
-    def decode_handshake_request(packet_bytes: bytes) -> 'Packet':
-        """Decode a Handshake Request packet."""
-        packet_bytes = decode_bytes_with_hamming(packet_bytes)
-        public_key = packet_bytes[:ExProtocol.PUBLIC_KEY_SIZE]
-        packet_type = packet_bytes[ExProtocol.PUBLIC_KEY_SIZE:ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH]
-        proof_of_work = packet_bytes[ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH:]
-        return Packet(packet_type, proof_of_work, public_key)
-
-    @staticmethod
-    def decode_handshake_response(packet_bytes: bytes) -> 'Packet':
-        """Decode a Handshake Response packet and return a Packet object."""
-        packet_bytes = decode_bytes_with_hamming(packet_bytes)
-        public_key = packet_bytes[:ExProtocol.PUBLIC_KEY_SIZE]
-        packet_type = packet_bytes[ExProtocol.PUBLIC_KEY_SIZE:ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH]
-        header_nonce = packet_bytes[ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH:ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH + ExProtocol.NONCE_LENGTH]
-        packet_size_limit_length = struct.unpack('!I', packet_bytes[ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH + ExProtocol.NONCE_LENGTH:ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH + ExProtocol.NONCE_LENGTH + ExProtocol.PACKET_SIZE_LIMIT_LENGTH])[0]
-        packet_size_limit_end = ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH + ExProtocol.NONCE_LENGTH + ExProtocol.PACKET_SIZE_LIMIT_LENGTH + packet_size_limit_length
-        packet_size_limit = int(packet_bytes[ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH + ExProtocol.NONCE_LENGTH + ExProtocol.PACKET_SIZE_LIMIT_LENGTH:packet_size_limit_end].decode('utf-8'))
-        encrypted_data_length = struct.unpack('!I', packet_bytes[packet_size_limit_end:packet_size_limit_end + ExProtocol.PACKET_SIZE_LIMIT_LENGTH])[0]
-        encrypted_data_start = packet_size_limit_end + ExProtocol.PACKET_SIZE_LIMIT_LENGTH
-        encrypted_data = packet_bytes[encrypted_data_start:encrypted_data_start + encrypted_data_length]
-        
-        return Packet(packet_type, b'', public_key, header_nonce=header_nonce, packet_size_limit=packet_size_limit, encrypted_data=encrypted_data)
-
-
 
 
 class ExProtocol:
@@ -566,8 +567,29 @@ class ExProtocol:
 
     def __init__(self):
         self.connections: Dict[bytes, 'Connection'] = {}
-        self.nonce_store: Dict[bytes, float] = {}
+        self.nonce_store: Dict[bytes, Dict[str, Any]] = {}
 
+
+
+    def add_nonce(self, public_key: bytes, nonce_data: Dict[str, Any]) -> None:
+        self.cleanup_nonces()
+        self.nonce_store[public_key] = nonce_data
+
+    def get_nonce(self, public_key: bytes) -> Optional[Dict[str, Any]]:
+        self.cleanup_nonces()
+        return self.nonce_store.get(public_key)
+
+    def remove_nonce(self, public_key: bytes) -> None:
+        self.cleanup_nonces()
+        if public_key in self.nonce_store:
+            del self.nonce_store[public_key]
+
+    def cleanup_nonces(self) -> None:
+        current_time = time.time()
+        print("Cleaning up nonces")
+        expired_keys = [key for key, value in self.nonce_store.items() if current_time - value['timestamp'] > self.NONCE_VALIDITY_PERIOD]
+        for key in expired_keys:
+            del self.nonce_store[key]
 
     def generate_key_pair(self) -> Tuple[Optional[ec.EllipticCurvePrivateKey], Optional[ec.EllipticCurvePublicKey]]:
         try:
