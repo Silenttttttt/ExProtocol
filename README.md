@@ -4,7 +4,7 @@ ExProtocol provides a comprehensive framework for establishing secure connection
 
 ## Features
 
-- **Secure Handshake**: Establishes a secure connection using elliptic curve cryptography and proof-of-work challenges.
+- **Secure Handshake**: Establishes a secure connection using Elliptic-curve Diffie–Hellman (ECDH) and proof-of-work challenges.
 - **Encrypted Communication**: Ensures data confidentiality and integrity using AES-GCM encryption.
 - **Flexible Packet Structure**: Supports various packet types with customizable headers and payloads.
 - **Replay Attack Prevention**: Implements mechanisms to detect and prevent replay attacks.
