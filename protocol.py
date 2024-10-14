@@ -11,7 +11,7 @@ from cryptography.exceptions import InvalidSignature
 import hashlib
 import traceback
 from c_hamming import encode_bytes_with_hamming, decode_bytes_with_hamming
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, List
 
 class Packet:
     def __init__(self, packet_type: int, payload: Optional[bytes] = None, public_key: Optional[bytes] = None, header_nonce: Optional[bytes] = None, payload_nonce: Optional[bytes] = None, packet_size_limit: Optional[int] = None, encrypted_data: Optional[bytes] = None, header_dict: Optional[Dict[str, Any]] = None, packet_uuid: Optional[str] = None, packet_family: Optional[str] = None, timestamp: Optional[int] = None, encoding: str = 'utf-8', data_type: str = 'text', status_code: int = 200, connection: Optional['Connection'] = None, pow_nonce: Optional[bytes] = None, difficulty: Optional[int] = None):
@@ -380,7 +380,7 @@ class Packet:
         encrypted_payload_length_bytes = encrypted_payload_length.to_bytes(ExProtocol.PAYLOAD_LENGTH_SIZE, 'big')
         
         # Construct the final packet structure with version at the beginning
-        packet = (
+        bytes_packet = (
             ExProtocol.PROTOCOL_VERSION +
             self.public_key +  # Assuming public_key is used as connection ID
             self.header_nonce +
@@ -391,7 +391,7 @@ class Packet:
             encrypted_payload
         )
         
-        return packet
+        return bytes_packet
 
 
 
@@ -485,6 +485,10 @@ class Packet:
             elif packet_type == ExProtocol.RESPONSE_FLAG:
                 if not all(k in header_dict for k in ("status_code", "packet_uuid")):
                     raise ValueError("Decrypted header must include 'status_code' and 'packet_uuid' for response packets.")
+                
+            elif packet_type == ExProtocol.STREAMING_FLAG:
+                if not all(k in header_dict for k in ("timestamp", "encoding", "type", "data_type", "stream_id", "sequence_number")):
+                    raise ValueError("Decrypted header must include 'timestamp', 'encoding', 'type', 'data_type', 'stream_id', and 'sequence_number' for streaming packets.")
             else:
                 raise ValueError("Unsupported packet type.")
 
@@ -527,6 +531,79 @@ class Packet:
             traceback.print_exc()
             print(f"Decryption failed: {e}")
             return None
+        
+
+    def generate_streaming_packet(self, connection: Optional['Connection'] = None, stream_id: str = '', sequence_number: int = 0, total_segments: int = 1) -> bytes:
+        """Create a streaming packet with additional header parameters."""
+        if not self.connection and not connection:
+            raise ValueError("Connection must be provided.")
+        
+        if connection:
+            self.connection = connection
+
+        # Ensure the packet is prepared for encryption
+        self.prepare_for_encryption()
+
+        # Use the connection's key
+        key_to_use = self.connection.connection_key
+        if not key_to_use:
+            raise ValueError("Connection key must be provided.")
+
+        # Construct the header with additional streaming parameters
+        header_dict = {
+            "timestamp": self.timestamp,
+            "encoding": self.encoding,
+            "type": ExProtocol.STREAMING_FLAG,
+            "data_type": self.data_type,
+            "stream_id": stream_id,
+            "sequence_number": sequence_number,
+            "total_segments": total_segments  # New field for total segments
+        }
+
+        header_json = zlib.compress(json.dumps(header_dict).encode('utf-8'))
+        
+        # Encrypt the header
+        aesgcm = AESGCM(key_to_use)
+        encrypted_header = aesgcm.encrypt(self.header_nonce, header_json, None)
+        
+        # Calculate the length of the encrypted header
+        encrypted_header_length = len(encrypted_header)
+        
+        # Check if payload is empty
+        if self.payload:
+            # Compress and encrypt the payload
+            compressed_payload = zlib.compress(self.payload)
+            encrypted_payload = aesgcm.encrypt(self.payload_nonce, compressed_payload, None)
+            encrypted_payload_length = len(encrypted_payload)
+        else:
+            encrypted_payload = b''
+            encrypted_payload_length = 0
+
+        # Validate length fields
+        if encrypted_header_length >= 2**(8 * ExProtocol.ENCRYPTED_HEADER_LENGTH_SIZE):
+            raise ValueError(f"Encrypted header length exceeds maximum representable size of {ExProtocol.ENCRYPTED_HEADER_LENGTH_SIZE} bytes.")
+        if encrypted_payload_length >= 2**(8 * ExProtocol.PAYLOAD_LENGTH_SIZE):
+            raise ValueError(f"Encrypted payload length exceeds maximum representable size of {ExProtocol.PAYLOAD_LENGTH_SIZE} bytes.")
+        
+        # Convert lengths to bytes
+        encrypted_header_length_bytes = encrypted_header_length.to_bytes(ExProtocol.ENCRYPTED_HEADER_LENGTH_SIZE, 'big')
+        encrypted_payload_length_bytes = encrypted_payload_length.to_bytes(ExProtocol.PAYLOAD_LENGTH_SIZE, 'big')
+        
+        # Construct the final packet structure with version at the beginning
+        packet = (
+            ExProtocol.PROTOCOL_VERSION +
+            self.public_key +  # Assuming public_key is used as connection ID
+            self.header_nonce +
+            encrypted_header_length_bytes +
+            encrypted_header +
+            self.payload_nonce +
+            encrypted_payload_length_bytes +
+            encrypted_payload
+        )
+        
+        hamming_encoded_packet = encode_bytes_with_hamming(packet)
+
+        return hamming_encoded_packet
 
 
 
@@ -537,6 +614,8 @@ class ExProtocol:
     HANDSHAKE_RESPONSE_FLAG = b'\x04' # Handshake Response
     DATA_FLAG = 5
     RESPONSE_FLAG = 6
+    STREAMING_FLAG = 7
+
 
     DEFAULT_VALIDITY_PERIOD = 3600  # 1 hour
     POW_DIFFICULTY = 4
@@ -565,6 +644,9 @@ class ExProtocol:
     PACKET_SIZE_LIMIT_LENGTH = 4
     DIFFICULTY_LENGTH = 1
 
+
+    STREAM_ID_LENGTH = 16
+
     def __init__(self):
         self.connections: Dict[bytes, 'Connection'] = {}
         self.nonce_store: Dict[bytes, Dict[str, Any]] = {}
@@ -586,7 +668,6 @@ class ExProtocol:
 
     def cleanup_nonces(self) -> None:
         current_time = time.time()
-        print("Cleaning up nonces")
         expired_keys = [key for key, value in self.nonce_store.items() if current_time - value['timestamp'] > self.NONCE_VALIDITY_PERIOD]
         for key in expired_keys:
             del self.nonce_store[key]
@@ -658,6 +739,7 @@ class Connection:
         self.valid_until = valid_until
         self.processed_uuids: Dict[str, float] = {}
         self.used_nonces: set = set([used_nonce])
+        self.received_segments: Dict[str, List[Optional[bytes]]] = {}
 
     def cleanup_uuids(self) -> None:
         current_time = time.time()
@@ -734,6 +816,117 @@ class Connection:
         return encoded_packet
 
 
+    def create_streaming_packets_info(self, data: bytes) -> List[Dict[str, Any]]:
+        """Prepare streaming packet information without generating the final packet."""
+        max_payload_size = self.max_packet_size - self.calculate_overhead()
+        total_segments = (len(data) + max_payload_size - 1) // max_payload_size
+        stream_id = os.urandom(ExProtocol.STREAM_ID_LENGTH).hex()  # Generate a stream ID
+        packets_info = []
+        print(f"Total segments: {total_segments}")
+        for sequence_number in range(total_segments):
+            start = sequence_number * max_payload_size
+            end = start + max_payload_size
+            segment_data = data[start:end]
+
+            packet_info = {
+                "payload": segment_data,
+                "stream_id": stream_id,
+                "sequence_number": sequence_number,
+                "total_segments": total_segments,
+                "timestamp": int(time.time())
+            }
+            packets_info.append(packet_info)
+
+        return packets_info
+
+    def generate_streaming_packet_on_the_fly(self, packet_info: Dict[str, Any]) -> bytes:
+        """Generate the encrypted packet on-the-fly from packet information."""
+        current_time = int(time.time())
+        if current_time - packet_info['timestamp'] > 30:
+            # Regenerate timestamp if older than 30 seconds
+            packet_info['timestamp'] = current_time
+
+        header_dict = {
+            "timestamp": packet_info['timestamp'],
+            "encoding": 'utf-8',
+            "type": ExProtocol.STREAMING_FLAG,
+            "data_type": "application/json",
+            "stream_id": packet_info['stream_id'],
+            "sequence_number": packet_info['sequence_number'],
+            "total_segments": packet_info['total_segments']
+        }
+
+        packet = Packet(
+            packet_type=ExProtocol.STREAMING_FLAG,
+            payload=packet_info['payload'],
+            header_dict=header_dict,
+            public_key=self.connection_id,
+            header_nonce=self.generate_unique_nonce(),
+            payload_nonce=self.generate_unique_nonce(),
+            connection=self
+        )
+
+
+        encrypted_packet = packet.generate_packet(self)
+        hamming_encoded_packet = encode_bytes_with_hamming(encrypted_packet)
+        return hamming_encoded_packet
+
+    def reassemble_streaming_packets(self, packets: List[bytes]) -> Optional[bytes]:
+        """Reassemble streaming packets into the original data."""
+        segments = {}
+        total_segments = None
+
+        for encrypted_packet in packets:
+            packet = Packet.decrypt(encrypted_packet, self)
+            if packet is None:
+                continue
+
+            sequence_number = packet.header_dict['sequence_number']
+            total_segments = packet.header_dict['total_segments']
+
+            segments[sequence_number] = packet.payload
+
+        if total_segments is None or len(segments) != total_segments:
+            print("Incomplete stream received.")
+            return None
+
+        # Reassemble the data
+        data = b''.join(segments[i] for i in range(total_segments))
+        return data
+    
+
+    def decrypt_and_store_packet(self, encrypted_packet: bytes) -> Optional[Packet]:
+        """Decrypt an encrypted packet, store it, and return the packet object."""
+        packet = self.decrypt_packet(encrypted_packet)
+        if packet:
+            stream_id = packet.header_dict['stream_id']
+            sequence_number = packet.header_dict['sequence_number']
+            total_segments = packet.header_dict['total_segments']
+
+            if stream_id not in self.received_segments:
+                self.received_segments[stream_id] = [None] * total_segments
+
+            self.received_segments[stream_id][sequence_number] = packet
+
+            return packet
+        return None
+
+
+    def get_stream_data(self, stream_id: str) -> Optional[List[Packet]]:
+        """Retrieve all packet objects for a given stream ID if all segments are received."""
+        if stream_id in self.received_segments:
+            segments = self.received_segments[stream_id]
+            if all(segment is not None for segment in segments):
+                return segments
+        return None
+
+
+    def calculate_overhead(self) -> int:
+        """Calculate the overhead for a packet."""
+        # This method should calculate the overhead based on the protocol's requirements
+        return ExProtocol.VERSION_LENGTH + ExProtocol.CONNECTION_ID_LENGTH + 2 * ExProtocol.NONCE_LENGTH + ExProtocol.ENCRYPTED_HEADER_LENGTH_SIZE + ExProtocol.PAYLOAD_LENGTH_SIZE
+
+
 
 # Example usage
 def main() -> None:
@@ -781,6 +974,63 @@ def main() -> None:
     packet = protocol_a.connections[connection_id_a].decrypt_packet(response_packet)
     print("Decrypted response:", packet.payload)
     print("Header:", packet.header_dict)
+
+
+    #sending a streamed string
+
+    data_to_stream = b"This is a large data stream that needs to be split into multiple packets." * 100
+
+
+    packets_info = protocol_a.connections[connection_id_a].create_streaming_packets_info(data_to_stream)
+
+    # Generate and process streaming packets on-the-fly
+    for packet_info in packets_info:
+        encrypted_packet = protocol_a.connections[connection_id_a].generate_streaming_packet_on_the_fly(packet_info)
+        packet = protocol_b.connections[connection_id_b].decrypt_and_store_packet(encrypted_packet)
+        if packet:
+            print(f"Received packet {packet.header_dict['sequence_number']} of stream {packet.header_dict['stream_id']}")
+
+    # Retrieve and reassemble the streaming data
+    stream_id = packets_info[0]['stream_id']
+    stream_data = protocol_b.connections[connection_id_b].get_stream_data(stream_id)
+    if stream_data:
+        reassembled_data = b''.join(packet.payload for packet in stream_data)
+        print("Reassembled streaming data:", reassembled_data[:100], "...")
+    else:
+        print("Failed to reassemble streaming data.")
+
+    assert reassembled_data == data_to_stream
+
+    #sending a file 
+
+    # Read the file to be sent
+    with open("protocol.py", "rb") as file:
+        data_to_stream = file.read()
+
+    start_time = time.time()
+
+    # Create streaming packets
+    packets_info = protocol_a.connections[connection_id_a].create_streaming_packets_info(data_to_stream)
+
+    # Generate and process streaming packets on-the-fly
+    for packet_info in packets_info:
+        encrypted_packet = protocol_a.connections[connection_id_a].generate_streaming_packet_on_the_fly(packet_info)
+        protocol_b.connections[connection_id_b].decrypt_and_store_packet(encrypted_packet)
+
+    # Retrieve and reassemble the streaming data
+    stream_id = packets_info[0]['stream_id']
+    stream_data = protocol_b.connections[connection_id_b].get_stream_data(stream_id)
+    if stream_data:
+        reassembled_data = b''.join(packet.payload for packet in stream_data)
+        print("Reassembled streaming data received successfully in {:.4f} seconds.".format(time.time() - start_time))
+
+        # Write the reassembled data to a new file
+        with open("received.py", "wb") as file:
+            file.write(reassembled_data)
+        print("File received and saved as 'received.py'.")
+    else:
+        print("Failed to reassemble streaming data.")
+
 
 
 if __name__ == "__main__":
