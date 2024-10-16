@@ -1,6 +1,6 @@
 # ExProtocol
 
-ExProtocol provides a comprehensive framework for establishing secure connections and exchanging data between nodes. It includes mechanisms for performing proof-of-work (PoW) challenges, establishing encrypted sessions, and transmitting data with integrity checks. The protocol is designed to be extensible and adaptable to different use cases, making it suitable for a wide range of applications.
+ExProtocol provides a comprehensive framework for establishing secure connections and exchanging data between nodes. It includes mechanisms for performing proof-of-work (PoW) challenges, establishing encrypted connections, and transmitting data with integrity checks. The protocol is designed to be extensible and adaptable to different use cases, making it suitable for a wide range of applications.
 
 ## Features
 
