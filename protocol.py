@@ -3,11 +3,11 @@ import json
 import zlib
 import os
 import time
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives import serialization, hashes
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric import ec # type: ignore 
+from cryptography.hazmat.primitives import serialization, hashes # type: ignore
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF # type: ignore
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM # type: ignore
+from cryptography.exceptions import InvalidSignature # type: ignore
 import hashlib
 import traceback
 from c_hamming import encode_bytes_with_hamming, decode_bytes_with_hamming
