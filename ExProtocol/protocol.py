@@ -10,7 +10,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM # type: ignore
 from cryptography.exceptions import InvalidSignature # type: ignore
 import hashlib
 import traceback
-from c_hamming import encode_bytes_with_hamming, decode_bytes_with_hamming
+from .c_hamming import encode_bytes_with_hamming, decode_bytes_with_hamming
 from typing import Optional, Tuple, Dict, Any, List
 
 class Packet:

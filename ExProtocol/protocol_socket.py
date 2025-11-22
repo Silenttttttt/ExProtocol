@@ -1,6 +1,6 @@
 import socket
 import json
-from protocol_wrapper import ProtocolWrapper
+from .protocol_wrapper import ProtocolWrapper
 import sys
 import traceback
 

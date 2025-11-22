@@ -1,0 +1,10 @@
+include README.md
+include LICENSE
+include c_hamming/hamming.c
+include c_hamming/makefile
+recursive-include c_hamming *.exe
+recursive-include c_hamming hamming
+global-exclude __pycache__
+global-exclude *.py[cod]
+global-exclude *$py.class
+

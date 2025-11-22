@@ -10,9 +10,9 @@ if [ ! -f "$VENV_ACTIVATE" ]; then
 fi
 
 # Run Server in a new terminal
-xfce4-terminal --title="Protocol Server" --command="bash -c 'source $VENV_ACTIVATE; python protocol_socket.py server; exec bash'" &
+xfce4-terminal --title="Protocol Server" --command="bash -c 'source $VENV_ACTIVATE; cd \"$(dirname \"$0\")\"; python -m ExProtocol.protocol_socket server; exec bash'" &
 # Wait for 1 seconds before running the client
 sleep 1
 
 # Run Client in a new terminal
-xfce4-terminal --title="Protocol Client" --command="bash -c 'source $VENV_ACTIVATE; python protocol_socket.py client; exec bash'" & 
+xfce4-terminal --title="Protocol Client" --command="bash -c 'source $VENV_ACTIVATE; cd \"$(dirname \"$0\")\"; python -m ExProtocol.protocol_socket client; exec bash'" & 

@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=45", "wheel", "setuptools_scm[toml]>=6.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "exprotocol"
+version = "0.1.0"
+description = "Secure peer-to-peer communication protocol with proof-of-work, encryption, and error correction"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "Muni Besen"},
+]
+keywords = ["p2p", "protocol", "cryptography", "security", "encryption", "networking"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Communications",
+    "Topic :: Security :: Cryptography",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+dependencies = [
+    "cryptography>=3.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Silenttttttt/ExProtocol"
+Repository = "https://github.com/Silenttttttt/ExProtocol"
+Issues = "https://github.com/Silenttttttt/ExProtocol/issues"
+
+[tool.setuptools]
+packages = ["ExProtocol"]
+
+[tool.setuptools.package-data]
+"*" = ["c_hamming/*.c", "c_hamming/makefile", "c_hamming/hamming*"]
+

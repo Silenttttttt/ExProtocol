@@ -1,4 +1,4 @@
-from protocol import ExProtocol
+from .protocol import ExProtocol
 import json
 
 
