@@ -2,12 +2,12 @@
 ExProtocol - Secure peer-to-peer communication protocol
 """
 
-__version__ = '0.1.0'
+__version__ = '0.1.1'
 
 from .protocol import ExProtocol, Packet, Connection
 from .protocol_wrapper import ProtocolWrapper
 from .protocol_socket import SocketProtocolWrapper
-from .c_hamming import encode_bytes_with_hamming, decode_bytes_with_hamming
+from .c_hamming import encode_bytes_with_hamming, decode_bytes_with_hamming, is_hamming_available
 
 __all__ = [
     'ExProtocol',
@@ -17,5 +17,6 @@ __all__ = [
     'SocketProtocolWrapper',
     'encode_bytes_with_hamming',
     'decode_bytes_with_hamming',
+    'is_hamming_available',
 ]
 

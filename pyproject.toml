@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "exprotocol"
-version = "0.1.0"
+version = "0.1.1"
 description = "Secure peer-to-peer communication protocol with proof-of-work, encryption, and error correction"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -41,5 +41,6 @@ Issues = "https://github.com/Silenttttttt/ExProtocol/issues"
 packages = ["ExProtocol"]
 
 [tool.setuptools.package-data]
-"*" = ["c_hamming/*.c", "c_hamming/makefile", "c_hamming/hamming*"]
+"ExProtocol" = ["c_hamming/*.c", "c_hamming/makefile"]
+
 

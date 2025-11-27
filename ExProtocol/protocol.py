@@ -68,12 +68,12 @@ class Packet:
         )
 
         packet = Packet(protocol.HPW_FLAG, b'', public_key_bytes, packet_size_limit=protocol.MAX_PACKET_SIZE)
-        encoded_packet = packet.encode_hpw_request()
+        encoded_packet = packet.encode_hpw_request(use_hamming=protocol.use_hamming)
         return encoded_packet, private_key
 
     @staticmethod
     def create_pow_challenge(protocol: 'ExProtocol', pow_request) -> Tuple[bytes, bytes]:
-        packet = Packet.decode_hpw_request(pow_request)
+        packet = Packet.decode_hpw_request(pow_request, use_hamming=protocol.use_hamming)
 
         if packet.packet_type != protocol.HPW_FLAG:
             print("Invalid PoW request.")
@@ -90,11 +90,11 @@ class Packet:
         protocol.add_nonce(packet.public_key, nonce_data)
 
         pow_challenge_packet = Packet(protocol.HPW_RESPONSE_FLAG, b'', packet.public_key, pow_nonce=pow_nonce, difficulty=difficulty.to_bytes(1, 'big'))
-        return pow_challenge_packet.encode_hpw_response(), packet.public_key
+        return pow_challenge_packet.encode_hpw_response(use_hamming=protocol.use_hamming), packet.public_key
 
     @staticmethod
     def complete_pow_request(protocol: 'ExProtocol', pow_challenge, private_key) -> bytes:
-        packet = Packet.decode_hpw_response(pow_challenge)
+        packet = Packet.decode_hpw_response(pow_challenge, use_hamming=protocol.use_hamming)
         difficulty = int.from_bytes(packet.difficulty, 'big')
         if packet.packet_type != protocol.HPW_RESPONSE_FLAG:
             print("Invalid PoW challenge structure.")
@@ -120,11 +120,11 @@ class Packet:
             format=serialization.PublicFormat.SubjectPublicKeyInfo
         )
         handshake_request_packet = Packet(protocol.HANDSHAKE_FLAG, proof_bytes, public_key_bytes)
-        return handshake_request_packet.encode_handshake_request()
+        return handshake_request_packet.encode_handshake_request(use_hamming=protocol.use_hamming)
 
     @staticmethod
     def perform_handshake_response(protocol: 'ExProtocol', handshake_request):
-        packet = Packet.decode_handshake_request(handshake_request)
+        packet = Packet.decode_handshake_request(handshake_request, use_hamming=protocol.use_hamming)
 
         if packet.packet_type != protocol.HANDSHAKE_FLAG:
             print("Invalid handshake request.")
@@ -188,11 +188,11 @@ class Packet:
 
         protocol.initialize_connection(connection_id, connection_key, valid_until, private_key, protocol.MAX_PACKET_SIZE, max_packet_size, protocol, nonce)
 
-        return handshake_response_packet.encode_handshake_response(), private_key, connection_id
+        return handshake_response_packet.encode_handshake_response(use_hamming=protocol.use_hamming), private_key, connection_id
 
     @staticmethod
     def complete_handshake(protocol: 'ExProtocol', handshake_response: bytes, private_key: ec.EllipticCurvePrivateKey) -> Optional[bytes]:
-        packet = Packet.decode_handshake_response(handshake_response)
+        packet = Packet.decode_handshake_response(handshake_response, use_hamming=protocol.use_hamming)
 
         if packet.packet_type != protocol.HANDSHAKE_RESPONSE_FLAG:
             print("Invalid handshake response flag.")
@@ -217,16 +217,16 @@ class Packet:
 
         return connection_id
 
-    def encode_hpw_request(self) -> bytes:
+    def encode_hpw_request(self, use_hamming: bool = True) -> bytes:
         """Encode an Initiator PoW Request packet."""
         packet = (
             self.public_key +
             self.packet_type +
             struct.pack('!I', self.packet_size_limit)
         )
-        return encode_bytes_with_hamming(packet)
+        return encode_bytes_with_hamming(packet, use_hamming=use_hamming)
 
-    def encode_hpw_response(self) -> bytes:
+    def encode_hpw_response(self, use_hamming: bool = True) -> bytes:
         """Encode a Responder PoW Challenge packet."""
 
         #self.pow_nonce = os.urandom(ExProtocol.NONCE_POW_LENGTH)
@@ -237,18 +237,18 @@ class Packet:
             self.packet_type +
             self.difficulty
         )
-        return encode_bytes_with_hamming(packet)
+        return encode_bytes_with_hamming(packet, use_hamming=use_hamming)
     
-    def encode_handshake_request(self) -> bytes:
+    def encode_handshake_request(self, use_hamming: bool = True) -> bytes:
         """Encode a Handshake Request packet with the requested POW solution."""
         packet = (
             self.public_key +
             self.packet_type +
             self.payload
         )
-        return encode_bytes_with_hamming(packet)
+        return encode_bytes_with_hamming(packet, use_hamming=use_hamming)
 
-    def encode_handshake_response(self) -> bytes:
+    def encode_handshake_response(self, use_hamming: bool = True) -> bytes:
         """Encode a Handshake Response packet."""
         packet_size_limit_length = struct.pack('!I', len(str(self.packet_size_limit)))
         encrypted_data_length = struct.pack('!I', len(self.encrypted_data))
@@ -265,21 +265,21 @@ class Packet:
             encrypted_data_length +
             self.encrypted_data
         )
-        return encode_bytes_with_hamming(packet)
+        return encode_bytes_with_hamming(packet, use_hamming=use_hamming)
 
     @staticmethod
-    def decode_hpw_request(packet_bytes: bytes) -> 'Packet':
+    def decode_hpw_request(packet_bytes: bytes, use_hamming: bool = True) -> 'Packet':
         """Decode an Initiator PoW Request packet."""
-        packet_bytes = decode_bytes_with_hamming(packet_bytes)
+        packet_bytes = decode_bytes_with_hamming(packet_bytes, use_hamming=use_hamming)
         public_key = packet_bytes[:ExProtocol.PUBLIC_KEY_SIZE]
         packet_type = packet_bytes[ExProtocol.PUBLIC_KEY_SIZE:ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH]
         max_packet_size = struct.unpack('!I', packet_bytes[ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH:ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH + ExProtocol.PACKET_SIZE_LIMIT_LENGTH])[0]
         return Packet(packet_type, b'', public_key, packet_size_limit=max_packet_size)
 
     @staticmethod
-    def decode_hpw_response(packet_bytes: bytes) -> 'Packet':
+    def decode_hpw_response(packet_bytes: bytes, use_hamming: bool = True) -> 'Packet':
         """Decode a Responder PoW Challenge packet."""
-        packet_bytes = decode_bytes_with_hamming(packet_bytes)
+        packet_bytes = decode_bytes_with_hamming(packet_bytes, use_hamming=use_hamming)
         public_key = packet_bytes[:ExProtocol.PUBLIC_KEY_SIZE]
         pow_nonce = packet_bytes[ExProtocol.PUBLIC_KEY_SIZE:ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.NONCE_POW_LENGTH]
         packet_type = packet_bytes[ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.NONCE_POW_LENGTH:ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.NONCE_POW_LENGTH + ExProtocol.PACKET_TYPE_LENGTH]
@@ -287,18 +287,18 @@ class Packet:
         return Packet(packet_type, b'', public_key, pow_nonce=pow_nonce, difficulty=difficulty.to_bytes(ExProtocol.DIFFICULTY_LENGTH, 'big'))
 
     @staticmethod
-    def decode_handshake_request(packet_bytes: bytes) -> 'Packet':
+    def decode_handshake_request(packet_bytes: bytes, use_hamming: bool = True) -> 'Packet':
         """Decode a Handshake Request packet."""
-        packet_bytes = decode_bytes_with_hamming(packet_bytes)
+        packet_bytes = decode_bytes_with_hamming(packet_bytes, use_hamming=use_hamming)
         public_key = packet_bytes[:ExProtocol.PUBLIC_KEY_SIZE]
         packet_type = packet_bytes[ExProtocol.PUBLIC_KEY_SIZE:ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH]
         proof_of_work = packet_bytes[ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH:]
         return Packet(packet_type, proof_of_work, public_key)
 
     @staticmethod
-    def decode_handshake_response(packet_bytes: bytes) -> 'Packet':
+    def decode_handshake_response(packet_bytes: bytes, use_hamming: bool = True) -> 'Packet':
         """Decode a Handshake Response packet and return a Packet object."""
-        packet_bytes = decode_bytes_with_hamming(packet_bytes)
+        packet_bytes = decode_bytes_with_hamming(packet_bytes, use_hamming=use_hamming)
         public_key = packet_bytes[:ExProtocol.PUBLIC_KEY_SIZE]
         packet_type = packet_bytes[ExProtocol.PUBLIC_KEY_SIZE:ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH]
         header_nonce = packet_bytes[ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH:ExProtocol.PUBLIC_KEY_SIZE + ExProtocol.PACKET_TYPE_LENGTH + ExProtocol.NONCE_LENGTH]
@@ -402,7 +402,7 @@ class Packet:
             connection_id = connection.connection_id
 
             # Decode the packet using Hamming
-            packet_bytes = decode_bytes_with_hamming(encrypted_packet)
+            packet_bytes = decode_bytes_with_hamming(encrypted_packet, use_hamming=connection.use_hamming)
 
             # Calculate offsets
             version_end = ExProtocol.VERSION_LENGTH
@@ -601,7 +601,7 @@ class Packet:
             encrypted_payload
         )
         
-        hamming_encoded_packet = encode_bytes_with_hamming(packet)
+        hamming_encoded_packet = encode_bytes_with_hamming(packet, use_hamming=self.connection.use_hamming if self.connection else True)
 
         return hamming_encoded_packet
 
@@ -647,9 +647,19 @@ class ExProtocol:
 
     STREAM_ID_LENGTH = 16
 
-    def __init__(self):
+    def __init__(self, use_hamming: bool = True):
+        """
+        Initialize ExProtocol instance.
+        
+        Args:
+            use_hamming (bool): Whether to use Hamming encoding for error correction.
+                               Defaults to True. If False, packets will be sent without
+                               Hamming encoding. If True but binary unavailable, will
+                               gracefully fall back to no encoding.
+        """
         self.connections: Dict[bytes, 'Connection'] = {}
         self.nonce_store: Dict[bytes, Dict[str, Any]] = {}
+        self.use_hamming = use_hamming
 
 
 
@@ -722,7 +732,7 @@ class ExProtocol:
         return Packet.complete_handshake(self, handshake_response, private_key)
 
     def initialize_connection(self, connection_id: bytes, connection_key: bytes, valid_until: int, private_key: ec.EllipticCurvePrivateKey, max_packet_size_a: int, max_packet_size_b: int, protocol: 'ExProtocol', used_nonce = bytes) -> None:
-        self.connections[connection_id] = Connection(connection_id, connection_key, min(max_packet_size_a, max_packet_size_b), private_key, valid_until, protocol, used_nonce)
+        self.connections[connection_id] = Connection(connection_id, connection_key, min(max_packet_size_a, max_packet_size_b), private_key, valid_until, protocol, used_nonce, use_hamming=self.use_hamming)
 
     def verify_pow(self, nonce, proof, difficulty) -> bool:
         hash_result = hashlib.sha256(nonce + proof).hexdigest()
@@ -730,7 +740,21 @@ class ExProtocol:
 
 
 class Connection:
-    def __init__(self, connection_id: bytes, connection_key: bytes, max_packet_size: int, private_key: ec.EllipticCurvePrivateKey, valid_until: int, protocol: ExProtocol, used_nonce = bytes):
+    def __init__(self, connection_id: bytes, connection_key: bytes, max_packet_size: int, private_key: ec.EllipticCurvePrivateKey, valid_until: int, protocol: ExProtocol, used_nonce = bytes, use_hamming: bool = True):
+        """
+        Initialize Connection instance.
+        
+        Args:
+            connection_id: Unique connection identifier
+            connection_key: Encryption key for this connection
+            max_packet_size: Maximum packet size
+            private_key: Private key for this connection
+            valid_until: Timestamp when connection expires
+            protocol: ExProtocol instance
+            used_nonce: Initial nonce
+            use_hamming: Whether to use Hamming encoding. Defaults to True.
+                        If False, packets will be sent without Hamming encoding.
+        """
         self.protocol = protocol
         self.connection_id = connection_id
         self.connection_key = connection_key
@@ -740,6 +764,7 @@ class Connection:
         self.processed_uuids: Dict[str, float] = {}
         self.used_nonces: set = set([used_nonce])
         self.received_segments: Dict[str, List[Optional[bytes]]] = {}
+        self.use_hamming = use_hamming
 
     def cleanup_uuids(self) -> None:
         current_time = time.time()
@@ -782,7 +807,7 @@ class Connection:
             raise Exception("Failed to create data packet.")
         
         packet_uuid = hashlib.sha256(encrypted_packet).hexdigest()
-        encoded_packet = encode_bytes_with_hamming(encrypted_packet)
+        encoded_packet = encode_bytes_with_hamming(encrypted_packet, use_hamming=self.use_hamming)
         return encoded_packet, packet_uuid
 
     def create_response_packet(self, data: Optional[bytes] = None, original_packet_uuid: Optional[str] = None, header: Optional[Dict[str, Any]] = None, connection_id: Optional[bytes] = None) -> bytes:
@@ -812,7 +837,7 @@ class Connection:
         if encrypted_packet is None:
             raise Exception("Failed to create response packet.")
         
-        encoded_packet = encode_bytes_with_hamming(encrypted_packet)
+        encoded_packet = encode_bytes_with_hamming(encrypted_packet, use_hamming=self.use_hamming)
         return encoded_packet
 
 
@@ -868,7 +893,7 @@ class Connection:
 
 
         encrypted_packet = packet.generate_packet(self)
-        hamming_encoded_packet = encode_bytes_with_hamming(encrypted_packet)
+        hamming_encoded_packet = encode_bytes_with_hamming(encrypted_packet, use_hamming=self.use_hamming)
         return hamming_encoded_packet
 
     def reassemble_streaming_packets(self, packets: List[bytes]) -> Optional[bytes]:
