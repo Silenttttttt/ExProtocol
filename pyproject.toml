@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "exprotocol"
-version = "0.1.1"
+version = "0.1.2"
 description = "Secure peer-to-peer communication protocol with proof-of-work, encryption, and error correction"
 readme = "README.md"
 requires-python = ">=3.8"

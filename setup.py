@@ -261,7 +261,7 @@ except FileNotFoundError:
 
 setup(
     name='exprotocol',
-    version='0.1.1',
+    version='0.1.2',
     description='Secure peer-to-peer communication protocol with proof-of-work, encryption, and error correction',
     long_description=long_description,
     long_description_content_type='text/markdown',

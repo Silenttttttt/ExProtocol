@@ -2,7 +2,7 @@
 ExProtocol - Secure peer-to-peer communication protocol
 """
 
-__version__ = '0.1.1'
+__version__ = '0.1.2'
 
 from .protocol import ExProtocol, Packet, Connection
 from .protocol_wrapper import ProtocolWrapper
