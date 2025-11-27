@@ -3,10 +3,20 @@ import json
 
 
 class ProtocolWrapper:
-    def __init__(self):
-        self.protocol = ExProtocol()
+    def __init__(self, use_hamming: bool = True):
+        """
+        Initialize ProtocolWrapper instance.
+        
+        Args:
+            use_hamming (bool): Whether to use Hamming encoding for error correction.
+                              Defaults to True. If False, packets will be sent without
+                              Hamming encoding. The protocol is cross-compatible and can
+                              receive both Hamming-encoded and plain data.
+        """
+        self.protocol = ExProtocol(use_hamming=use_hamming)
         self.connection_id = None
         self.private_key = None
+        self.use_hamming = use_hamming
 
     def create_handshake_request(self):
         # Create a handshake request and store the private key

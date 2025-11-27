@@ -7,10 +7,22 @@ import traceback
 MAX_PACKET_SIZE = 8192
 
 class SocketProtocolWrapper:
-    def __init__(self, host='localhost', port=12345):
+    def __init__(self, host='localhost', port=12345, use_hamming: bool = True):
+        """
+        Initialize SocketProtocolWrapper instance.
+        
+        Args:
+            host (str): Host address to bind/connect to. Defaults to 'localhost'.
+            port (int): Port number. Defaults to 12345.
+            use_hamming (bool): Whether to use Hamming encoding for error correction.
+                              Defaults to True. If False, packets will be sent without
+                              Hamming encoding. The protocol is cross-compatible and can
+                              receive both Hamming-encoded and plain data.
+        """
         self.host = host
         self.port = port
-        self.protocol_wrapper = ProtocolWrapper()
+        self.protocol_wrapper = ProtocolWrapper(use_hamming=use_hamming)
+        self.use_hamming = use_hamming
 
     def start_server(self):
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
